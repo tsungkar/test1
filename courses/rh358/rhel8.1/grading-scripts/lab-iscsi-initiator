@@ -1,0 +1,194 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     iscsi-initiator - grading script for RH358 Accessing iSCSI Storage guided
+#                       exercise
+#
+# SYNOPSIS
+#     iscsi-initiator {start|finish}
+#
+#        start   - prepare the system for starting the lab
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start
+#     or finish for the Accessing iSCSI Storage guided exercise.
+#
+# CHANGELOG
+#   * Mon May 11 2020 Herve Quatremain <hquatrem@redhat.com>
+#   - original code
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+target='serverd'
+target_a='servera'
+second_disk_device='vdb'
+
+# This defines which subcommands are supported (start, grade, etc.).
+# Corresponding lab_COMMAND functions must be defined.
+declare -a valid_commands=(start finish)
+
+
+
+function disk_cleanup {
+  for i in {5..1}
+  do
+    if ${ssh} ${target} "test -b /dev/${second_disk_device}$i"
+    then
+      ${ssh} ${target} "umount -l /dev/${second_disk_device}$i"
+      ${ssh} ${target} "swapoff /dev/${second_disk_device}$i"
+      ${ssh} ${target} "dd if=/dev/zero of=/dev/${second_disk_device}$i bs=512 count=10"
+      ${ssh} ${target} "parted --script /dev/${second_disk_device} rm $i"
+    fi
+  done
+  ${ssh} ${target} "wipefs --all --force /dev/${second_disk_device}"
+  ${ssh} ${target} "test -b /dev/${second_disk_device} && dd if=/dev/zero of=/dev/${second_disk_device} bs=1024 count=2048"
+}
+
+
+function lab_start {
+
+  print_header 'Starting lab.'
+
+  print_line "Preparing ${target_a} and ${target} for lab exercise work:"
+  print_line
+  host_reachable ${target_a} ${target}
+
+  pad " · Deploying the help file on ${target_a}"
+  if ${ssh} ${target_a} "mkdir -p /root/${problem_name}"
+  then
+    cat <<EOF | ${ssh} ${target_a} "cat > /root/${problem_name}/iscsi.txt"
+Initiator IQN: iqn.2014-06.com.example:servera
+   Target IQN: iqn.2014-06.com.example:serverd
+Target portal: 172.25.250.13 (port 3260)
+EOF
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Backing up /etc/fstab on ${target_a}"
+  if ${ssh} ${target_a} "test -s /var/tmp/lab-${problem_name}-fstab || cp /etc/fstab /var/tmp/lab-${problem_name}-fstab"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Cleaning up spare disk ${second_disk_device} on ${target}"
+  disk_cleanup
+  print_SUCCESS
+
+  pad " · Installing the targetcli package on ${target}"
+  if ${ssh} ${target} "yum -y install targetcli"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Starting the target service on ${target}"
+  ${ssh} ${target} "systemctl enable --now target"
+  print_SUCCESS
+
+  pad " · Configuring the firewall on ${target}"
+  ${ssh} ${target} "firewall-cmd --permanent --add-service=iscsi-target ; firewall-cmd --reload"
+  print_SUCCESS
+
+  pad " · Creating the iSCSI target on ${target}"
+  ${ssh} ${target} "targetcli clearconfig confirm=True ; \
+    targetcli /backstores/block/ create serverd.disk1 /dev/${second_disk_device} && \
+    targetcli /iscsi create iqn.2014-06.com.example:serverd && \
+    targetcli /iscsi/iqn.2014-06.com.example:serverd/tpg1/acls/ create iqn.2014-06.com.example:servera && \
+    targetcli /iscsi/iqn.2014-06.com.example:serverd/tpg1/luns create /backstores/block/serverd.disk1 && \
+    targetcli saveconfig"
+  if [ $? -eq 0 ]
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+
+function lab_finish {
+
+  print_header "Cleaning up the lab on ${target_a} and ${target}:"
+  host_reachable ${target_a} ${target}
+
+  pad " · Removing the help file from ${target_a}"
+  ${ssh} ${target_a} "rm -rf /root/${problem_name}"
+  print_SUCCESS
+
+  pad " · Unmounting /data from ${target_a}"
+  TMP_FILE=$(mktemp)
+  ${ssh} ${target_a} "iscsiadm -m session -P 3" > "${TMP_FILE}"
+  DEVICE=$(awk '/Attached scsi disk/ { print $4 }' "${TMP_FILE}")
+  TARGET=$(awk '/Target:/ { print $2 }' "${TMP_FILE}")
+  PORTAL=$(awk '/Persistent Portal:/ { print $NF }' "${TMP_FILE}")
+  rm -f "${TMP_FILE}"
+  ${ssh} ${target_a} "umount /data"
+  if [ -n "${DEVICE}" ]
+  then
+    for i in {5..1}
+    do
+      if ${ssh} ${target_a} "test -b /dev/${DEVICE}$i"
+      then
+        ${ssh} ${target_a} "umount -l /dev/${DEVICE}$i"
+        ${ssh} ${target_a} "swapoff /dev/${DEVICE}$i"
+      fi
+    done
+    ${ssh} ${target_a} "umount -l /dev/${DEVICE}"
+  fi
+  ${ssh} ${target_a} "rm -rf /data"
+  print_SUCCESS
+
+  pad " · Restoring /etc/fstab on ${target_a}"
+  ${ssh} ${target_a} "test -s /var/tmp/lab-${problem_name}-fstab && cp /var/tmp/lab-${problem_name}-fstab /etc/fstab ; rm -f /var/tmp/lab-${problem_name}-fstab"
+  print_SUCCESS
+
+  pad " · Logging out of the target on ${target_a}"
+  if [ -n "${TARGET}" -a -n "${PORTAL}" ]
+  then
+    ${ssh} ${target_a}  "iscsiadm -m node -T ${TARGET} -p ${PORTAL} -u ; iscsiadm -m node -T ${TARGET} -p ${PORTAL} -o delete"
+  fi
+  print_SUCCESS
+
+  pad " · Removing the iscsi-initiator-utils package from ${target_a}"
+  ${ssh} ${target_a} "yum remove -y iscsi-initiator-utils ; rm -rf /var/lib/iscsi /var/lock/iscsi /etc/iscsi"
+  print_SUCCESS
+
+  pad " · Closing the firewall port on ${target}"
+  ${ssh} ${target} 'firewall-cmd --remove-service=iscsi-target --permanent ; firewall-cmd --remove-port=3260/tcp --permanent ; firewall-cmd --reload'
+  print_SUCCESS
+
+  pad " · Cleaning up the target on ${target}"
+  ${ssh} ${target} "targetcli clearconfig confirm=True"
+  print_SUCCESS
+
+  pad " · Removing the targetcli package from ${target}"
+  ${ssh} ${target} "yum remove -y targetcli target-restore ; rm -rf /etc/target /var/target"
+  print_SUCCESS
+
+  pad " · Cleaning up spare disk ${second_disk_device} on ${target}"
+  disk_cleanup
+  print_SUCCESS
+
+  print_line
+  print_line 'Lab finished.'
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

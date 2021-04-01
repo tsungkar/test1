@@ -1,0 +1,77 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-demo-cnames - demo of the rhel_dns_cname_create() and rhel_dns_cname_delete()
+#                       functions
+#
+# SYNOPSIS
+#     lab-demo-cnames {start|finish}
+#
+#        start   - prepare the system for starting the lab
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start
+#     or finish for the demo.
+#
+# CHANGELOG
+#   * Mon Mar 09 2020 Herve Quatremain <hquatrem@redhat.com>
+#   - original code
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+# Whatever the target, the CNAME configuration is always applied on the
+# dnsmasq service running on bastion.
+target='servera'
+
+# This defines which subcommands are supported (start, grade, etc.).
+# Corresponding lab_COMMAND functions must be defined.
+declare -a valid_commands=(start finish)
+
+
+function lab_start {
+
+  pad " · Creating the www-a and www-b CNAMES for servera and serverb"
+  rhel_dns_cname_create www-a.lab.example.com,servera.lab.example.com \
+               www-b.lab.example.com,serverb.lab.example.com
+  if [ $? -eq 0 ]
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+
+function lab_finish {
+
+  print_header "Cleaning up the lab on ${target}:"
+  host_reachable ${target}
+
+  pad " · Removing the www-a and www-b CNAMES"
+  rhel_dns_cname_delete
+  if [ $? -eq 0 ]
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  print_line 'Lab finished.'
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

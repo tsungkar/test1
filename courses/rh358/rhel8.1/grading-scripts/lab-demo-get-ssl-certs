@@ -1,0 +1,90 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-demo-get-ssl-certs - demo of the rhel_certs_create() and
+#                              rhel_certs_delete() functions
+#
+# SYNOPSIS
+#     lab-demo-get-ssl-certs {start|finish}
+#
+#        start   - prepare the system for starting the lab
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start
+#     or finish for the demo.
+#
+# CHANGELOG
+#   * Mon Mar 09 2020 Herve Quatremain <hquatrem@redhat.com>
+#   - original code
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+target='servera'
+
+# This defines which subcommands are supported (start, grade, etc.).
+# Corresponding lab_COMMAND functions must be defined.
+declare -a valid_commands=(start finish)
+
+
+function lab_start {
+
+  pad " · Creating certificates for servera and serverb"
+  rhel_certs_create servera.lab.example.com serverb.lab.example.com
+  if [ $? -eq 0 ]
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Copying the certificates in student's home"
+  cp /etc/pki/CA/certs/servera.lab.example.com.crt \
+     /etc/pki/CA/private/servera.lab.example.com.key \
+     /home/student
+  cp /etc/pki/CA/certs/serverb.lab.example.com.crt \
+     /etc/pki/CA/private/serverb.lab.example.com.key \
+     /home/student
+  chown student: /home/student/server[ab].lab.example.com.{crt,key}
+  print_SUCCESS
+
+  pad " · Copying the CA certificates in student's home"
+  cp /etc/pki/CA/cacert.pem /home/student
+  chown student: /home/student/cacert.pem
+  print_SUCCESS
+
+  print_line
+}
+
+
+function lab_finish {
+
+  print_header "Cleaning up the lab on ${target}:"
+  host_reachable ${target}
+
+  pad " · Removing the certificates for servera and serverb"
+  # Always succeed
+  rhel_certs_delete servera.lab.example.com serverb.lab.example.com
+  print_SUCCESS
+
+  pad " · Removing the certificates in student's home"
+  rm -f /home/student/server[ab].lab.example.com.{crt,key} \
+        /home/student/cacert.pem
+  print_SUCCESS
+
+  print_line 'Lab finished.'
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

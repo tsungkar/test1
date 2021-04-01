@@ -1,0 +1,230 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-database-review - grading script for RH358 Configuring MariaDB SQL
+#                           Databases lab.
+#
+# SYNOPSIS
+#     lab-database-review {start|finish}
+#
+#        start   - prepare the system for starting the lab
+#        grade   - perform evaluation steps on the system
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start, grade,
+#     or finish for the RH358 Configuring MariaDB SQL Databases lab.
+#
+# CHANGELOG
+#   * Thu Jul 02 2020 George Hacker <ghacker@redhat.com>
+#   - Call rhel_config_ansible() to download student project files
+#   * Tue May 26 2020 Victor Costea <vcostea@redhat.com>
+#   - original code
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+
+targeta='servera'
+targetb='serverb'
+targetw='workstation'
+
+ge_playbook_dir="classroom/ansible"
+ge_playbook_tar="${problem_name}.tar"
+ge_install_playbook='playbook.yml'
+ge_remove_db='remove_mariadb.yml'
+ge_install_pkgs='install_packages.yml'
+
+ansible_proj_dir='/home/student/database-review'
+
+declare -a valid_commands=(start grade finish)
+
+function verify_mariadb_service_status {
+  pad " · Checking if MariaDB service is enabled"
+  cmd1="${ssh} ${targeta} systemctl is-enabled mariadb"
+  if ${cmd1}
+  then
+    print_PASS
+  else
+    print_FAIL
+    return 1
+  fi
+
+  pad " · Checking if MariaDB service is running"
+  cmd2="${ssh} ${targeta} systemctl is-active mariadb"
+  if ${cmd2}
+  then
+    print_PASS
+  else
+    print_FAIL
+    return 1
+  fi
+
+  return 0
+}
+
+function verify_database_exists {
+  pad " · Verify if legacy database exists"
+  cmd1="${ssh} ${targeta} mysql -uroot -predhat -e 'use legacy'"
+  if ${cmd1}
+  then
+    print_PASS
+    return 0
+  else
+    print_FAIL
+    return 1
+  fi
+
+  return 0
+}
+
+function verify_mysql_firewall {
+  pad " · Verify firewall allows mysql service on ${targeta}"
+  cmd1="${ssh} ${targeta} firewall-cmd --list-services | grep mysql"
+  if ${cmd1}
+  then
+    print_PASS
+    return 0
+  else
+    print_FAIL
+    return 1
+  fi
+
+  return 0
+}
+
+function verify_remote_connection  {
+  USER=$1
+  pad " · Verify if ${USER} can remote connect"
+  cmd1="${ssh} ${targetb} mysql -u${USER} -p${USER}_password -h ${targeta} -e 'show databases'"
+  if ${cmd1}
+  then
+    print_PASS
+    return 0
+  else
+    print_FAIL
+    return 1
+  fi
+
+  return 0
+}
+
+function lab_start {
+
+  print_header "Starting ${problem_name} exercise."
+
+  host_reachable ${targeta} ${targetb}
+
+  #
+  # Download playbook directory to /tmp
+  #
+  pad ' · Download exercise playbooks'
+  cmd1="curl -o /tmp/${ge_playbook_tar} http://materials.example.com/${ge_playbook_dir}/${ge_playbook_tar}"
+  if ${cmd1}
+  then
+    tar -xf /tmp/${ge_playbook_tar} -C /tmp
+    rm -rf /tmp/${ge_playbook_tar}
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  #
+  # Run playbook to ensure mariadb is not installed
+  # Run playbook to ensure python 3 is installed
+  #
+  pad ' · Ensure mariadb is not installed'
+  cmd1="ansible-playbook ${ge_remove_db}"
+  cmd2="ansible-playbook ${ge_install_pkgs}"
+  cd /tmp/${problem_name}
+  if ${cmd1} && ${cmd2} & spinner $! 2
+  then
+    cd
+    rm -rf /tmp/${problem_name}
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  #
+  # Download student project files
+  #
+  rhel_config_ansible ${ansible_proj_dir}
+
+  print_line
+}
+
+function lab_grade {
+
+  print_header "Grading the student's work on ${targeta} and ${targetb}:"
+  host_reachable ${targeta} ${targetb}
+
+  verify_mariadb_service_status
+  verify_database_exists
+  verify_mysql_firewall
+  verify_remote_connection mary
+  verify_remote_connection legacy
+  verify_remote_connection report
+
+  # Overall grade
+  print_line
+  pad 'Overall lab grade'
+  if [[ ${fail_count} -eq 0 ]]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+function lab_finish {
+
+  print_header "Cleaning up the ${problem_name} exercise on ${targeta} and ${targetb}:"
+  host_reachable ${targeta} ${targetb}
+
+  #
+  # Download playbook directory
+  #
+  pad ' · Download exercise playbooks'
+  cmd1="curl -o /tmp/${ge_playbook_tar} http://materials.example.com/${ge_playbook_dir}/${ge_playbook_tar}"
+  if ${cmd1}
+  then
+    tar -xf /tmp/${ge_playbook_tar} -C /tmp
+    rm -rf /tmp/${ge_playbook_tar}
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  #
+  # Run playbook to cleanup GE exercise
+  #
+  pad ' · Run exercise cleanup playbooks'
+  cmd1="ansible-playbook ${ge_remove_db}"
+  cd /tmp/${problem_name}
+  if ${cmd1} & spinner $! 2
+  then
+    cd
+    rm -rf /tmp/${problem_name}
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  print_line
+  print_line 'Lab finished.'
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

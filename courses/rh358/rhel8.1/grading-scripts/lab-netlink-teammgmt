@@ -1,0 +1,121 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-netlink-teammgmt - start/finish script for RH358
+#
+# SYNOPSIS
+#     lab-netlink-teammgmt {start|finish}
+#
+# DESCRIPTION
+#     This script performs the start/finish steps for the link aggregation
+#     teaming management guided exercise for RH358. This script configures
+#     the 2nd NIC on serverd to have the 192.168.0.254/24 address.
+#
+# CHANGELOG
+#   * Wed Apr 29 2020 George Hacker <ghacker@redhat.com>
+#   - Suppress server headings per E2E QA feedback
+#   * Mon Apr 20 2020 George Hacker <ghacker@redhat.com>
+#   - Fixed broken team creation code (shell quoting issue)
+#   * Thu Apr 02 2020 George Hacker <ghacker@redhat.com>
+#   - original code
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin
+
+# Initialize and set some variables
+run_as_root='true'
+
+host='servera'
+gateway='serverd'
+
+declare -a valid_commands=(start finish)
+
+
+function lab_start {
+
+  print_header 'Starting netlink-teammgmt exercise.'
+  host_reachable ${host}
+  host_reachable ${gateway}
+
+  if ! gw_iface2=$(rhel_get_nicname ${gateway} 2); then
+    pad " · Error: unable to get gateway 2nd interface name - ${gateway}"
+    print_FAIL
+    exit 1
+  fi
+  if ! host_iface2=$(rhel_get_nicname ${host} 2); then
+    pad " · Error: unable to get host 2nd interface name - ${host}"
+    print_FAIL
+    exit 1
+  fi
+  if ! host_iface3=$(rhel_get_nicname ${host} 3); then
+    pad " · Error: unable to get host 3rd interface name - ${host}"
+    print_FAIL
+    exit 1
+  fi
+
+  # "Preparing ${host} for lab exercise work:"
+  if ${ssh} ${host} "nmcli con show team0"; then
+    pad " · Warning: team interface already exists on ${host}"
+    print_SUCCESS
+  else
+    pad " · Creating team interface on ${host}"
+    cmd1='nmcli con add type team con-name team0 ifname team0 team.runner activebackup'
+    cmd2='nmcli con modify team0 ipv4.addresses 192.168.0.100/24'
+    cmd3='nmcli con modify team0 ipv4.method manual'
+    cmd4="nmcli con add type ethernet slave-type team con-name team0-port1 ifname ${host_iface2} master team0"
+    cmd5="nmcli con add type ethernet slave-type team con-name team0-port2 ifname ${host_iface3} master team0"
+    if ${ssh} ${host} "${cmd1} && ${cmd2} && ${cmd3} && ${cmd4} && ${cmd5}"; then
+      print_SUCCESS
+      pad " · Activating team interface on ${host}"
+      cmd1='nmcli con up team0'
+      cmd2='nmcli con up team0-port1'
+      cmd3='nmcli con up team0-port2'
+      if ${ssh} ${host} "${cmd1} && ${cmd2} && ${cmd3}"; then
+        print_SUCCESS
+      else
+        print_FAIL
+        return 1
+      fi
+    else
+      print_FAIL
+      return 1
+    fi
+  fi
+
+  # "Preparing ${gateway} for lab exercise work:"
+  rhel_config_nic ${gateway} ${gw_iface2} '192.168.0.254/24'
+
+  print_line
+}
+
+function lab_finish {
+
+  print_header 'Finishing netlink-teammgmt exercise'
+  host_reachable ${host}
+  host_reachable ${gateway}
+
+  if ! gw_iface2=$(rhel_get_nicname ${gateway} 2); then
+    pad " · Error: unable to get gateway 2nd interface name - ${gateway}"
+    print_FAIL
+    exit 1
+  fi
+
+  # "Restoring ${host} from lab exercise work:"
+  rhel_team_destroy ${host} team0
+
+  # "Restoring ${gateway} from lab exercise work:"
+  rhel_unconfig_nic ${gateway} ${gw_iface2}
+
+  print_line
+}
+
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

@@ -1,0 +1,394 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-compreview-network - grading script for RH358 Configuring
+#               Network Infrastructure Services comprehensive review
+#
+# SYNOPSIS
+#     lab-compreview-network {start|grade|finish}
+#
+#        start   - prepare the system for starting the lab
+#        grade   - perform evaluation steps on the system
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start, grade,
+#     or finish for the RH358 Configuring Network Infrastructure Services
+#     comprehensive review
+#
+# CHANGELOG
+#   * Mon Jun 22 2020 George Hacker <ghacker@redhat.com>
+#   - original code
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+
+dhcp_server='servera'
+dns_bind='servera'
+dns_unbound='serverb'
+
+proj_tarfile='cr-network.tar'
+
+team_name='team0'
+srvc_name='dhcp-conn'
+
+router='serverd'
+mac_secondary_router='52:54:00:01:fa:0d'
+prefix_secondary='fc62:5265:6448:6174'
+IP_secondary_router="${prefix_secondary}::d"
+
+declare -a valid_commands=(start grade finish)
+
+function lab_start {
+
+  print_header "Starting ${problem_name} exercise."
+
+  host_reachable bastion servera serverb serverc serverd
+
+  #  On workstation:
+  rhel_install_ansible
+
+  pad " · Installing the rhel-system-roles package on workstation"
+  if yum install -y rhel-system-roles
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  rhel_config_ansible /home/student/cr-network
+
+  #  On bastion:
+  rhel_bastion_bind     # mirror function = rhel_bastion_unbind
+
+  #  On server[a-d]:
+  for host in servera serverb serverc serverd ; do
+
+    # Backup the network configuration and the /etc/machine-id file.
+    rhel_backup_network ${host}            # mirror function = rhel_restore_network
+
+    # Destroy team0-port1, team0-port2, team0 connections, if they exist
+    rhel_team_destroy ${host} ${team_name}
+
+    # Generate a new machine-id name so the systems do not get the same
+    #   DHCP unique identifier (DUID).
+    pad " · Generating a new machine ID on ${host}"
+    cmd1='rm -f /etc/machine-id'
+    cmd2='systemd-machine-id-setup'
+    if ${ssh} ${host} "${cmd1} ; ${cmd2} ; test -s /etc/machine-id"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    # Set the connection.autoconnect parameter to off for the connection
+    #   associated with the second interface. Although not strictly
+    #   required, this is to avoid for the DHCP clients to automatically
+    #   get an IP address as soon as the DHCP server goes up.
+    pad " · Disabling autoconnect for eth1 and eth2 on ${host}"
+    for iface in eth1 eth2
+    do
+      # For all NetworkManager connections associated with the interface,
+      # disable autoconnect and stop the connection
+      for conn in $(${ssh} ${host} 'nmcli --get-values UUID connection show')
+      do
+        cmd1="nmcli --get-values connection.interface-name,GENERAL.DEVICES con show '${conn}'"
+        if ${ssh} ${host} "${cmd1}" | grep -wq "${iface}"
+        then
+          ${ssh} ${host} "nmcli con mod '${conn}' connection.autoconnect no ; nmcli --wait 0 con down '${conn}'"
+        fi
+      done
+      ${ssh} ${target} "nmcli dev dis ${iface}"
+    done
+    print_SUCCESS
+
+    pad " · Restarting NetworkManager on ${host}"
+    if ${ssh} ${host} 'systemctl restart NetworkManager'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+  done
+
+  #
+  # Router: configuring the IPv6 layer
+  #
+
+  pad " · Setting the IPv6 address on ${router}"
+  interface=$(${ssh} ${router} 'nmcli --get-values GENERAL.HWADDR,GENERAL.DEVICE --escape no device show' | grep -i -A1 "${mac_secondary_router}" | tail -n 1)
+  if [ -z "${interface}" ]
+  then
+    print_FAIL
+  elif ! ${ssh} ${router} "nmcli con add con-name ${problem_name} type ethernet ifname ${interface} ipv6.method manual ipv6.addresses ${IP_secondary_router}/64 && nmcli con up ${problem_name}"
+  then
+    print_FAIL
+  else
+    print_SUCCESS
+
+#   pad " · Configuring IPv6 forwarding on ${router}"
+#   if ${ssh} ${router} 'sysctl -w net.ipv6.conf.all.forwarding=1'
+#   then
+#     ${ssh} ${router} "echo net.ipv6.conf.all.forwarding=1 > /etc/sysctl.d/${problem_name}.conf"
+#     print_SUCCESS
+#   else
+#     print_FAIL
+#   fi
+
+    pad " · Installing radvd on ${router}"
+    if ${ssh} ${router} 'yum -y install radvd'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    #
+    # Router: configuring radvd
+    #
+
+    pad " · Configuring radvd on ${router}"
+    ${ssh} ${router} "cat > /etc/radvd.conf" <<EOF
+interface ${interface}
+{
+  AdvSendAdvert on;
+  AdvManagedFlag on;
+  AdvOtherConfigFlag on;
+  MaxRtrAdvInterval 60;
+};
+EOF
+    print_SUCCESS
+
+    pad " · Starting and enabling radvd on ${router}"
+    if ${ssh} ${router} 'systemctl enable --now radvd.service'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+  fi
+
+# rhel_lab_run_ansible ${grade_verb}
+
+  print_line
+}
+
+function lab_grade {
+
+  print_header "Grading ${problem_name} exercise."
+
+  host_reachable bastion servera serverb serverc serverd
+
+  for team_host in servera serverb
+  do
+    # Is the team configured and running on the 2nd interface
+    pad " · Confirm the team0 is configured on servera"
+    cmd1="teamdctl ${team_name} state"
+    cmd2="nmcli con show | grep -e '^${team_name} '"
+    cmd3="nmcli con show | grep -e '^${team_name}-port1 .*eth1'"
+    cmd4="nmcli con show | grep -e '^${team_name}-port2 .*eth2'"
+    if ${ssh} ${team_host} "${cmd1} && ${cmd2} && ${cmd3} && ${cmd4}"
+    then
+      print_PASS
+    else
+      print_FAIL
+    fi
+  done
+
+  # Is DHCP server installed and running?
+  pad " · Confirm ${dhcp_server} is a DHCP/DHCPv6 server"
+  cmd1='systemctl -q is-active dhcpd'
+  cmd2='systemctl -q is-active dhcpd6'
+  cmd3='systemctl -q is-enabled dhcpd'
+  cmd4='systemctl -q is-enabled dhcpd6'
+  if ${ssh} ${dhcp_server} "${cmd1} && ${cmd2} && ${cmd3} && ${cmd4}"
+  then
+    print_PASS
+    # Is DHCP listening on the right port?
+    # Does it issue the right static IPv4 and IPv6 addresses?
+  else
+    print_FAIL
+  fi
+
+  # Is the authoritative DNS server installed and running?
+  pad " · Confirm ${dns_bind} is an authoritative DNS server"
+  cmd1='systemctl -q is-active named'
+  cmd2='systemctl -q is-enabled named'
+  if ${ssh} ${dns_bind} "${cmd1} && ${cmd2}"
+  then
+    print_PASS
+    # Issue some queries from the caching server to confirm it will answer correctly.
+    # Issue some queries from the another server to confirm it will not answer.
+    # Does a zone transfer work from the caching server?
+  else
+    print_FAIL
+  fi
+
+  # Is the caching DNS server installed and running?
+  pad " · Confirm ${dns_unbound} is a caching name server"
+  cmd1='systemctl -q is-active unbound'
+  cmd2='systemctl -q is-enabled unbound'
+  if ${ssh} ${dns_unbound} "${cmd1} && ${cmd2}"
+  then
+    print_PASS
+    # Issue some local queries to confirm it will answer correctly.
+    # Issue some non-local queries to confirm it will answer correctly.
+  else
+    print_FAIL
+  fi
+
+  pad " · Ansible config-network.yml playbook exists"
+  if cd ${ansible_proj_dir} && [ -f config-network.yml ]
+  then
+    print_SUCCESS
+    # Unconfigure the 2nd network interface on serverc
+    pad " · Unconfigure ${srvc_name} connection on serverc"
+    ${ssh} serverc "nmcli con del ${srvc_name}"
+    print_SUCCESS
+    # Run the playbook.
+    pad " · Apply the config-network.yml playbook to serverc"
+    if ansible-playbook -i serverc.lab.example.com, config-network.yml
+    then
+      print_SUCCESS
+      # Is the 2nd network interface configured and working on serverc?
+      pad " · Confirm ${srvc_name} connection is configured on serverc"
+      cmd1="nmcli --get-values connection.interface-name con show '${srvc_name}' | grep 'eth1'"
+      cmd2="nmcli --get-values ipv4.method con show '${srvc_name}' | grep 'auto'"
+      cmd3="nmcli --get-values IP4.ADDRESS con show '${srvc_name}' | grep '192.168.62.12/24'"
+      cmd4="nmcli --get-values ipv6.method con show '${srvc_name}' | grep 'auto'"
+      cmd5="nmcli --get-values IP6.ADDRESS con show '${srvc_name}' | tr -d '\\' | grep -i 'fc62:5265:6448:6174::c/128'"
+      if ${ssh} serverc "${cmd1} && ${cmd2} && ${cmd3} && ${cmd4}"
+      then
+        print_PASS
+      else
+        print_FAIL
+      fi
+    else
+      print_FAIL
+    fi
+  else
+    print_FAIL
+  fi
+
+  # Overall grade
+  print_line
+  pad 'Overall lab grade'
+  if [[ ${fail_count} -eq 0 ]]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+function lab_finish {
+
+  print_header "Finishing ${problem_name} exercise."
+
+  host_reachable bastion servera serverb serverc serverd
+
+  pad " · Removing the dnsmasq and radvd packages from ${router}"
+  ${ssh} ${router} 'yum remove -y dnsmasq radvd'
+  print_SUCCESS
+
+  pad " · Closing the firewall ports on ${router}"
+  ${ssh} ${router} 'firewall-cmd --remove-service=dhcp --remove-service=dhcpv6 --permanent ; firewall-cmd --remove-service=dhcp --remove-service=dhcpv6'
+  print_SUCCESS
+
+  pad " · Cleaning up configuration files on ${router}"
+  ${ssh} ${router} "rm -rf /etc/radvd.conf*"
+  # ${ssh} ${router} "rm -rf /etc/sysctl.d/${problem_name}.conf /etc/radvd.conf*"
+  print_SUCCESS
+
+  pad " · Removing the IPv6 address from ${router}"
+  ${ssh} ${router} "nmcli --wait 10 con down ${problem_name} ; nmcli --wait 10 con delete ${problem_name}"
+  print_SUCCESS
+
+  # On servera: Remove the dhcp-server package and clean up /etc/sysconfig/dhcp and /etc/dhcp.
+  pad " · Removing the dhcp-server package from ${dhcp_server}"
+  ${ssh} ${dhcp_server} 'yum -y remove dhcp-server'
+  print_SUCCESS
+
+  pad " · Closing the DHCP firewall ports on ${dhcp_server}"
+  cmd1='firewall-cmd --remove-service=dhcp --remove-service=dhcpv6 --permanent'
+  cmd2='firewall-cmd --remove-service=dhcp --remove-service=dhcpv6'
+  ${ssh} ${dhcp_server} "${cmd1} ; ${cmd2}"
+  print_SUCCESS
+
+  pad " · Cleaning up DHCP configuration on ${dhcp_server}"
+  ${ssh} ${dhcp_server} 'rm -rf /etc/dhcp/dhcpd* /etc/sysconfig/dhcpd /var/lib/dhcpd'
+  print_SUCCESS
+
+  # On servera, remove the bind package and clean up /etc/named* and /var/named.
+  # On servera, close the DHCP and DNS firewall ports.
+  rhel_erase_bind ${dns_bind}
+
+  # On serverb, remove the unbound package and clean up its configuration and cache.
+  # On serverb, close the DNS firewall ports.
+  rhel_erase_unbound ${dns_unbound}
+
+  #  On bastion:
+  rhel_bastion_unbind
+
+  #  On server[a-d]:
+  for host in servera serverb serverc serverd ; do
+
+    # Destroy team0-port1, team0-port2, team0 connections, if they exist
+    rhel_team_destroy ${host} ${team_name}
+
+    # Removing all the connections except the connection associated with
+    #   the first/main interface
+    pad " · Deactivating the secondary interfaces on ${host}"
+    for iface in eth1 eth2
+    do
+      for conn in $(${ssh} ${host} 'nmcli --get-values UUID connection show')
+      do
+        cmd1="nmcli --get-values connection.interface-name,GENERAL.DEVICES con show '${conn}'"
+        if ${ssh} ${host} "${cmd1}" | grep -wq "${iface}"
+        then
+          cmd1="nmcli --wait 10 con down '${conn}'"
+          cmd2="nmcli --wait 10 con delete '${conn}'"
+          ${ssh} ${host} "${cmd1} ; ${cmd2}"
+        fi
+      done
+    done
+    print_SUCCESS
+
+    # Restore the original network configuration
+    rhel_restore_network ${host}            # mirror function = rhel_restore_network
+
+    pad " · Restarting NetworkManager on ${host}"
+    if ${ssh} ${host} 'systemctl restart NetworkManager'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+  done
+
+  pad " · Removing the rhel-system-roles package from workstation"
+  yum remove -y rhel-system-roles
+  print_SUCCESS
+
+# rhel_lab_run_ansible ${grade_verb}
+
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

@@ -1,0 +1,1017 @@
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     labtool.rh358.shlib - lab grading script rh358 function library
+#
+# SYNOPSIS
+#     Add the following line at the top of your script:
+#
+#        source /path/to/labtool.rh358.shlib
+#
+#     *after* the source of the generic labtool.shlib
+#
+# DESCRIPTION
+#
+# CHANGELOG
+#   * Thu Jul 02 2020 George Hacker <ghacker@redhat.com>
+#   - Added rhel_lab_run_ansible() function
+#   * Tue Jun 23 2020 George Hacker <ghacker@redhat.com>
+#   - Extend rhel_config_ansible() to recurse when given an argument
+#   * Fri Jun 12 2020 George Hacker <ghacker@redhat.com>
+#   - Added rhel_erase_bind() and rhel_erase_unbound() functions
+#   * Mon Apr 20 2020 George Hacker <ghacker@redhat.com>
+#   - Added an optional IPv6 argument to the rhel_config_nic() function
+#   * Thu Apr 09 2020 George Hacker <ghacker@redhat.com>
+#   - Added the rhel_bastion-bind() and rhel_bastion-unbind() functions
+#   * Sat Apr 04 2020 George Hacker <ghacker@redhat.com>
+#   - Make ${lab_materials} and ${lab_dir} normal, not local, variables
+#   * Thu Apr 02 2020 George Hacker <ghacker@redhat.com>
+#   - Added the rhel_config_nic() and rhel_unconfig_nic() functions
+#   - Added the rhel_config_ansible() function
+#   * Fri Mar 27 2020 George Hacker <ghacker@redhat.com>
+#   - Added the rhel_team_destroy() function
+#   * Fri Mar 20 2020 George Hacker <ghacker@redhat.com>
+#   - Added the rhel_install_ansible() function
+#   * Mon Mar 16 2020 George Hacker <ghacker@redhat.com>
+#   - Adapted a RHCSA library function to get NIC name (thanks, Sneg)
+#   - Call __print_error instead of echo statements to stderr
+#   * Mon Mar 09 2020 Herve Quatremain <hquatrem@redhat.com>
+#   - adding the certs_create() and certs_delete() functions
+#   - adding the dns_cname_create() and dns_cname_delete() functions
+#   - adding the dns_slave_create() and dns_slave_delete() functions
+#   - adding the dns_delegate_create() and dns_delegate_delete() functions
+
+#####################################
+# global variable definitions       #
+#####################################
+
+# Export LANG so we get consistent results
+# For instance, fr_FR uses comma (,) as the decimal separator.
+export LANG=en_US.UTF-8
+
+#####################################
+# general-purpose functions         #
+#####################################
+
+# Usage: rhel_get_nicname ${server} 1, Returns: nicname|1, Status: Tested
+# where 1 is first NIC; use 2, 3 and so on for second, and third NICs.
+
+function rhel_get_nicname {
+
+  local -r server="${1}" nic=$((${2}-1))
+  local -a nics=()
+  local cmd
+
+  if [[ $# -ne 2 ]]; then
+    __print_error 'incorrect argument count'
+    return 1
+  fi
+
+  cmd="lshw -class network | awk -F': ' '/logical name:/ { print \$2 }'"
+  nics=( $(${ssh} root@${server} "$cmd") )
+  if [[ -n ${nics[${nic}]} ]]; then
+    echo ${nics[${nic}]}
+    return 0
+  else
+    return 1
+  fi
+}
+
+
+# Use OpenSSL to create a CA and generate certificates and private keys
+# for the hostnames provided as arguments.
+#
+# Everything is created locally (i.e. workstation)
+# The CA is created the first time this function is called.
+# Each argument is a hostname (FQDN) for which you request a certificate.
+#
+# On success, the following files are generated:
+#     /etc/pki/CA/certs/<FQDN>.crt: the certificate
+#   /etc/pki/CA/private/<FQDN>.key: the associated private key
+# You can instruct students to grab those files (they need root permissions
+# to get the private key), or you can move or copy those files somewhere else.
+#
+# The generated certificates are signed by the private CA.
+# The CA certificate is:
+#     /etc/pki/CA/cacert.pem
+# Two links to this file are also available (for older courses):
+#     /etc/pki/CA/example-ca.crt
+#     /etc/pki/CA/EXAMPLE-CA-CERT
+#
+# Examples:
+#    rhel_certs_create servera.lab.example.com
+#    rhel_certs_create serverb.lab.example.com www-b.lab.example.com
+#
+# Usage example:
+#    run_as_root='true'
+#    pad " · Creating certificate for servera.lab.example.com"
+#    rhel_certs_create servera.lab.example.com
+#    if [ $? -eq 0 ]
+#    then
+#      print_SUCCESS
+#    else
+#      print_FAIL
+#    fi
+#
+#    pad " · Copying the certificate in student's home"
+#    cp /etc/pki/CA/certs/servera.lab.example.com.crt \
+#       /etc/pki/CA/private/servera.lab.example.com.key \
+#       /etc/pki/CA/cacert.pem \
+#       /home/student
+#    print_SUCCESS
+#
+# For compatibility with futur web browsers, the certificate validity is
+# only 180 days (the CA certificate is valid for a year)
+# See https://tech.slashdot.org/story/19/08/18/1833223/should-https-certificates-expire-after-just-397-days
+#
+# Return 0 on success or 1 on error (see stderr for details)
+
+function rhel_certs_create {
+
+  local CADIR=/etc/pki/CA
+  local SUBJ_PREFIX="/C=US/ST=North Carolina/L=Raleigh/O=Example, Inc."
+
+  if [ $# -lt 1 ]
+  then
+    __print_error 'At least one hostname is expected'
+    return 1
+  fi
+
+  #
+  # Check if the CA has already been built.
+  # The script does not recreate the CA at every run because students may have
+  # added that CA cartificate to their web browser.
+  # Recreating the certificate would force students to remove the old one
+  # from their browser first to avoid facing certificate errors.
+  #
+
+  # First, verify if the required files are missing
+  if [ ! -f "${CADIR}/index.txt" -o \
+       ! -f "${CADIR}/serial" -o \
+       ! -f "${CADIR}/cacert.pem" -o \
+       ! -f "${CADIR}/private/cakey.pem" ]
+  then
+    rm -rf "${CADIR}"
+  else
+    # The files seem to be there.
+    # Make sure that the certificate is not going to expire in the next
+    # 15 days (=1296000 seconds)
+    if ! openssl x509 -in "${CADIR}/cacert.pem" -checkend 1296000
+    then
+      # The certificate is going to expire, so the script will create a new CA
+      rm -rf "${CADIR}"
+    else
+      # Check if it is the certificate of a CA
+      openssl x509 -in "${CADIR}/cacert.pem" -ext basicConstraints  -noout | \
+      grep -qi CA:TRUE
+      if [ $? -ne 0 ]
+      then
+        # The certificate does not have the CA:TRUE basic constraint, so
+        # lets delete that CA and create a new one
+        rm -rf "${CADIR}"
+      fi
+    fi
+  fi
+
+  #
+  # Create a new CA.
+  #          /etc/pki/CA/cacert.pem: CA certificate
+  #      /etc/pki/private/cakey.pem: CA certificate private key
+  # Those are the default paths as defined in the OpenSSL configuration file,
+  # /etc/pki/tls/openssl.cnf
+  #
+  # Also, the script does not set a password on the CA private key, which is a
+  # very bad practice.
+  #
+
+  mkdir -p "${CADIR}"/{certs,crl,newcerts,csr}
+  mkdir -p -m 0700 "${CADIR}/private"
+  touch "${CADIR}/index.txt"
+
+  if [ ! -f "${CADIR}/cacert.pem" ]
+  then
+    echo 01 > "${CADIR}/serial"
+    openssl req -days 365 -new -x509 -nodes \
+                -out "${CADIR}/cacert.pem" \
+                -keyout "${CADIR}/private/cakey.pem" \
+                -subj "${SUBJ_PREFIX}/CN=example.com Certificate Authority"
+    if [ $? -ne 0 ]
+    then
+      __print_error 'Cannot create the CA certificate and/or key'
+      rm -rf "${CADIR}"
+      return 1
+    fi
+    # Create links to the CA certificate. Some exercise may refer to the
+    # certificate by those names.
+    ln -s "${CADIR}/cacert.pem" "${CADIR}/example-ca.crt"
+    ln -s "${CADIR}/cacert.pem" "${CADIR}/EXAMPLE-CA-CERT"
+  fi
+
+  #
+  # For each CN passed as argument, create a signed certificate and its
+  # private key.
+  #       /etc/pki/CA/certs/<CN>.crt: certificate
+  #     /etc/pki/CA/private/<CN>.key: private key (not password protected)
+  #         /etc/pki/CA/csr/<CN>.csr: certificate signing request
+  # Those files are not installed in /etc/pki/tls/{certs,private}/ because this
+  # what the system administrator usually has to do when they receive these
+  # files.
+  # This is probably what students will have to do in the exercise.
+  #
+
+  local ERROR=0
+  for CN
+  do
+    rm -f "${CADIR}/certs/${CN}.crt" "${CADIR}/private/${CN}.key" "${CADIR}/csr/${CN}.csr"
+    >"${CADIR}/index.txt"
+    # CSR
+    openssl req -new -nodes \
+                -out "${CADIR}/csr/${CN}.csr" \
+                -keyout "${CADIR}/private/${CN}.key" \
+                -subj "${SUBJ_PREFIX}/CN=${CN}"
+    if [ $? -ne 0 ]
+    then
+      __print_error "${CN}: cannot create the CSR"
+      rm -f "${CADIR}/private/${CN}.key" "${CADIR}/csr/${CN}.csr"
+      ERROR=1
+      continue
+    fi
+    # Sign
+    # The `-policy` option refers to the `[ policy_anything ]` section of
+    # the /etc/pki/tls/openssl.cnf file and forces the CA to accept any
+    # form of the subject from the CSR.
+    openssl ca -batch -days 180 \
+               -in "${CADIR}/csr/${CN}.csr" \
+               -out "${CADIR}/certs/${CN}.crt" \
+               -policy policy_anything
+    if [ $? -ne 0 ]
+    then
+      __print_error "${CN}: cannot sign the CSR and generate the certificate"
+      rm -f "${CADIR}/certs/${CN}.crt" "${CADIR}/private/${CN}.key" "${CADIR}/csr/${CN}.csr"
+      ERROR=1
+      continue
+    fi
+  done
+
+  return ${ERROR}
+}
+
+
+# Delete the certificates and private keys of the hostnames provided as
+# arguments.
+#
+# Each argument is a hostname (FQDN) for which the certificate has to be
+# removed. Asking to remove a certificate that does not exist does not raise
+# an error.
+#
+# Example:
+#    rhel_certs_delete servera.lab.example.com serverb.lab.example.com
+# Always return 0
+
+function rhel_certs_delete {
+
+  local CADIR=/etc/pki/CA
+
+  for CN
+  do
+    rm -f "${CADIR}/certs/${CN}.crt" "${CADIR}/private/${CN}.key" "${CADIR}/csr/${CN}.csr"
+  done
+  >"${CADIR}/index.txt"
+
+  return 0
+}
+
+
+# Create hostname aliases (CNAME) for the given hosts.
+#
+# Each argument follows the syntax of the dnsmasq --cname= option
+# (see the --cname option in the dnsmasq(8) man page) and has the following
+# format:
+#     cname,cname,...,target
+# where target is the existing hostname to alias.
+# For example, to create the wwwa.lab.example.com CNAME for servera, use the
+# following syntax:
+#     wwwa.lab.example.com,servera.lab.example.com
+#
+# The configuration is added to the dnsmasq running on the bastion system.
+#
+# Example:
+#   Creating two sets of CNAMEs for servera and serverb:
+#   rhel_dns_cname_create www1.lab.example.com,www-a.lab.example.com,servera.lab.example.com \
+#                web-b.lab.example.com,serverb.lab.example.com
+#
+# To confirm, use dig <cname_to_test>
+#
+# Return 0 on success or 1 on error (see stderr for details)
+
+function rhel_dns_cname_create {
+
+  if [ $# -lt 1 ]
+  then
+    __print_error 'At least one CNAME is expected'
+    return 1
+  fi
+
+  local SAVE_IFS=${IFS}
+  local TMP_DNSMASQ_CONF=$(mktemp)
+  local -a ITEMS
+
+  for CNAME
+  do
+    # Pre-flight tests on the given CNAME string
+    IFS=,
+    ITEMS=(${CNAME})
+    IFS=${SAVE_IFS}
+    if [ ${#ITEMS[@]} -lt 2 ]
+    then
+      __print_error "${CNAME}: wrong format: expecting cname1[,cname2,...],hostname"
+      rm -f "${TMP_DNSMASQ_CONF}"
+      return 1
+    fi
+    # Verifying the the last component (target) is a hostname that exists
+    if ! getent hosts ${ITEMS[-1]}
+    then
+      __print_error "${CNAME}: host ${ITEMS[-1]} does not exist"
+      rm -f "${TMP_DNSMASQ_CONF}"
+      return 1
+    fi
+
+    echo "cname=${CNAME}" >> "${TMP_DNSMASQ_CONF}"
+  done
+
+  if ! ${scp} "${TMP_DNSMASQ_CONF}" bastion:/etc/dnsmasq.d/cname-create.conf
+  then
+    __print_error "${TMP_DNSMASQ_CONF}: cannot copy to bastion:/etc/dnsmasq.d/cname-create.conf"
+    rm -f "${TMP_DNSMASQ_CONF}"
+    return 1
+  fi
+
+  rm -f "${TMP_DNSMASQ_CONF}"
+
+  if ! ${ssh} bastion systemctl restart dnsmasq.service
+  then
+    __print_error 'bastion: cannot restart dnsmasq.service'
+    ${ssh} bastion rm -f /etc/dnsmasq.d/cname-create.conf
+    ${ssh} bastion systemctl restart dnsmasq.service
+    return 1
+  fi
+
+  return 0
+}
+
+
+# Delete the CNAMEs created by a previous call to the rhel_dns_cname_create() function
+# Return 0 on success or 1 on error (see stderr for details)
+
+function rhel_dns_cname_delete {
+
+  ${ssh} bastion rm -f /etc/dnsmasq.d/cname-create.conf
+  if ! ${ssh} bastion systemctl restart dnsmasq.service
+  then
+    __print_error 'bastion: cannot restart dnsmasq.service'
+    return 1
+  fi
+
+  return 0
+}
+
+
+# Configure bastion as the DNS master for lab.example.com and declare the
+# given hosts as secondary for that zone (so they can be configured by
+# students with a DNS slave server)
+#
+# The configuration is added to the dnsmasq running on the bastion system.
+#
+# Example:
+#   Declaring servera and serverb as slaves:
+#   rhel_dns_slave_create servera.lab.example.com serverb.lab.example.com
+#
+# To confirm, use dig -t ns lab.example.com (the slaves should be listed)
+#
+# Return 0 on success or 1 on error (see stderr for details)
+
+function rhel_dns_slave_create {
+
+  if [ $# -lt 1 ]
+  then
+    __print_error 'At least one slave hostname is expected'
+    return 1
+  fi
+
+  local TMP_DNSMASQ_CONF=$(mktemp)
+  cat <<EOF > "${TMP_DNSMASQ_CONF}"
+# The current DNS system, bastion (172.25.250.254), is authoritative for
+# lab.example.com and 172.25.250.0/24
+auth-server=bastion.lab.example.com,172.25.250.254
+auth-zone=lab.example.com,172.25.250.0/24
+# Adding a MX record for good measure
+mx-host=lab.example.com
+EOF
+
+  local IP
+  local -a SERVERS
+  local -a IPS
+
+  for SLAVE
+  do
+    # Retrieve the IP address of the given host
+    IP=$(host -t A -W 5 "${SLAVE}" | \
+         grep -Eo "[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" | \
+         head -n 1)
+    if [ -z "${IP}" ]
+    then
+      __print_error "${SLAVE}: cannot retrieve IP address"
+      rm -f "${TMP_DNSMASQ_CONF}"
+      return 1
+    fi
+    IPS+=(${IP})
+    SERVERS+=(${SLAVE})
+  done
+
+  local SAVE_IFS=${IFS}
+  IFS=,
+  echo "auth-sec-servers=${SERVERS[*]}" >> "${TMP_DNSMASQ_CONF}"
+  echo "auth-peer=${IPS[*]}" >> "${TMP_DNSMASQ_CONF}"
+  IFS=${SAVE_IFS}
+
+  if ! ${scp} "${TMP_DNSMASQ_CONF}" bastion:/etc/dnsmasq.d/slave-create.conf
+  then
+    __print_error "${TMP_DNSMASQ_CONF}: cannot copy to bastion:/etc/dnsmasq.d/slave-create.conf"
+    rm -f "${TMP_DNSMASQ_CONF}"
+    return 1
+  fi
+
+  rm -f "${TMP_DNSMASQ_CONF}"
+
+  if ! ${ssh} bastion systemctl restart dnsmasq.service
+  then
+    __print_error 'bastion: cannot restart dnsmasq.service'
+    ${ssh} bastion rm -f /etc/dnsmasq.d/slave-create.conf
+    ${ssh} bastion systemctl restart dnsmasq.service
+    return 1
+  fi
+
+  return 0
+}
+
+
+# Remove the slave configuration created by a previous call to the
+# rhel_dns_slave_create() function
+# Return 0 on success or 1 on error (see stderr for details)
+
+function rhel_dns_slave_delete {
+
+  ${ssh} bastion rm -f /etc/dnsmasq.d/slave-create.conf
+  if ! ${ssh} bastion systemctl restart dnsmasq.service
+  then
+    __print_error 'bastion: cannot restart dnsmasq.service'
+    return 1
+  fi
+
+  return 0
+}
+
+
+# Configure dnsmasq on bastion to delegate zones to another DNS system
+#
+# Each argument defines a delegation. Arguments are composed of two parts
+# separated by a comma (`,`)
+# The first part is the domain name to delegate.
+# The second part is the name of the DNS server that manages the delegated
+# domain.
+# For example:
+#    domain.lab.example.com,servera.lab.example.com
+# delegates the domain.lab.example.com domain to the DNS server running on
+# servera.lab.example.com
+#
+# For reverse zones, you can declare the delegation in two ways:
+#    10.1.2.0/24,servera.lab.example.com
+#  OR
+#    2.1.10.in-addr.arpa,servera.lab.example.com
+#
+# Return 0 on success or 1 on error (see stderr for details)
+
+function rhel_dns_delegate_create {
+
+  if [ $# -lt 1 ]
+  then
+    __print_error 'At least one delegation definition is expected'
+    return 1
+  fi
+
+  # Required package for rr (resource record) calculation
+  yum install -y python3-dns
+
+  local TMP_DNSMASQ_CONF=$(mktemp)
+  local SAVE_IFS=${IFS}
+  local ZONE
+  local NS
+  local IP
+  local RR
+  local -a IP_O
+
+  for ZONE_NS
+  do
+    ZONE=$(echo ${ZONE_NS} | cut -s -d, -f1)
+    NS=$(echo ${ZONE_NS} | cut -s -d, -f2)
+    IP=$(getent hosts "${NS}" | \
+      grep -oE "[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" | \
+      head -n 1)
+
+    # Pre-flight checks
+    if [ -z "${ZONE}" -o -z "${NS}" ]
+    then
+      __print_error "${ZONE_NS}: wrong format. Must be <zone>,<nameserver>"
+      rm -f "${TMP_DNSMASQ_CONF}"
+      return 1
+    fi
+    # Verify that we manage to get the IP address of the nameserver
+    if [ -z "${IP}" ]
+    then
+      __print_error "${ZONE_NS}: cannot retrieve IP of ${NS}"
+      rm -f "${TMP_DNSMASQ_CONF}"
+      return 1
+    fi
+
+    echo ${ZONE} | grep -qE "^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]+"
+    if [ $? -eq 0 ]
+    then
+      echo "rev-server=${ZONE},${IP}" >> "${TMP_DNSMASQ_CONF}"
+      ZONE=$(echo ${ZONE} | grep -oE "^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}")
+      IFS=.
+      IP_O=(${ZONE})
+      IFS=${SAVE_IFS}
+      ZONE="${IP_O[2]}.${IP_O[1]}.${IP_O[0]}.in-addr.arpa"
+    else
+      echo "server=/${ZONE}/${IP}" >> "${TMP_DNSMASQ_CONF}"
+    fi
+
+    # When using the server= parameter to redirect requests to another server
+    # (kind of a delegation), dnsmasq does not create a NS record.
+    # For example, the following parameter
+    #      server=/domain.lab.example.com/172.25.250.10
+    # redirects the requests for *.domain.lab.example.com to the DNS server
+    # at 172.25.250.10.
+    # However, if the DNS server at 172.25.250.10 is not yet installed,
+    # configured, and running, the following dig command returns nothing and
+    # does not show the delegation:
+    #      dig -t NS domain.lab.example.com
+    # That may confuse students. They may think that the delegation has not
+    # been configured yet in the upstream DNS.
+    # The following parameter, dns-rr=, hard codes that NS record in dnsmasq.
+    # With dns-rr= you can declare any record you want, but the value must be
+    # provided in hexa :(
+    # The Python dns module (from the python3-dns package), provides a way to
+          # get that hex string.
+    RR=$(python3 -c "import dns.rdata
+print(dns.rdata._hexify(
+        dns.rdata.from_text(
+          dns.rdataclass.IN,
+          dns.rdatatype.NS,
+          '${NS}.').to_digestable(),
+    10000))")
+      echo "dns-rr=${ZONE},2,${RR}" >> "${TMP_DNSMASQ_CONF}"
+  done
+
+  if ! ${scp} "${TMP_DNSMASQ_CONF}" bastion:/etc/dnsmasq.d/delegate-create.conf
+  then
+    __print_error "${TMP_DNSMASQ_CONF}: cannot copy to bastion:/etc/dnsmasq.d/delegate-create.conf"
+    rm -f "${TMP_DNSMASQ_CONF}"
+    return 1
+  fi
+
+  rm -f "${TMP_DNSMASQ_CONF}"
+
+  if ! ${ssh} bastion systemctl restart dnsmasq.service
+  then
+    __print_error 'bastion: cannot restart dnsmasq.service'
+    ${ssh} bastion rm -f /etc/dnsmasq.d/delegate-create.conf
+    ${ssh} bastion systemctl restart dnsmasq.service
+    return 1
+  fi
+
+  return 0
+}
+
+
+# Remove the delegation configuration created by a previous call to the
+# rhel_dns_delegate_create() function
+# Return 0 on success or 1 on error (see stderr for details)
+
+function rhel_dns_delegate_delete {
+
+  ${ssh} bastion rm -f /etc/dnsmasq.d/delegate-create.conf
+  if ! ${ssh} bastion systemctl restart dnsmasq.service
+  then
+    __print_error 'bastion: cannot restart dnsmasq.service'
+    return 1
+  fi
+  return 0
+}
+
+
+# Usage: rhel_install_ansible
+#
+# Returns: 0 when packages are installed, 1 otherwise
+
+function rhel_install_ansible {
+
+  local -r reqd_packages='ansible tree'
+
+  if ! rpm -q --quiet ${reqd_packages}
+  then
+    pad ' · Installing the ansible and tree packages'
+    if yum install -y ${reqd_packages} &> /dev/null
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+      return 1
+    fi
+  fi
+  return 0
+}
+
+
+# Usage: rhel_config_ansible [ PROJDIR ]
+#
+# Returns: 0 when exercise directory is created and populated, or
+#            when exercise directory already exists
+#          1 unable to download Ansible config or inventory
+#            the program will exit if unable to create the directory
+#          2 invalid # of arguments specified
+
+function rhel_config_ansible {
+
+  local ansible_proj_dir="${1}"
+  # ${problem_name} is defined by the "lab" script
+  local -r lab_materials="http://materials.example.com/labs/${problem_name}"
+  local wget_cmd
+
+  if [[ $# -eq 0 ]] ; then                    # legacy usage = no args
+    ansible_proj_dir="/home/student/${problem_name}"
+  elif [[ $# -ne 1 ]] ; then                  # otherwise 1 arg required
+    __print_error 'incorrect argument count'
+    return 2
+  fi
+
+  if [[ -d "${ansible_proj_dir}" ]]; then
+    pad ' · Ansible project directory already exists'
+    print_SUCCESS
+  elif [[ $# -eq 1 ]] ; then                  # new functionality with 1 arg
+    pad ' · Download files into Ansible project directory'
+    wget_cmd="wget -q --mirror -np -nH --cut-dirs=2 -P '${ansible_proj_dir}' --reject='index.html*' ${lab_materials}/"
+    if su - student -c "${wget_cmd}"
+    then
+      print_SUCCESS
+    else
+      print_FAIL ; return 1
+    fi
+  elif [[ $# -eq 0 ]] ; then                  # legacy usage without args
+    pad ' · Create Ansible project directory'
+    if mkdir -p "${ansible_proj_dir}" && cd "${ansible_proj_dir}"; then
+      print_SUCCESS
+    else
+      print_FAIL ; exit 1
+    fi
+    pad ' · Download Ansible configuration'
+    if curl -s -O ${lab_materials}/ansible.cfg; then
+      print_SUCCESS
+    else
+      print_FAIL ; return 1
+    fi
+    pad ' · Download Ansible inventory'
+    if curl -s -O ${lab_materials}/inventory; then
+      print_SUCCESS
+    else
+      print_FAIL ; return 1
+    fi
+    chown -R student:student .
+    cd -
+  fi
+  return 0
+}
+
+
+# Usage: rhel_lab_run_ansible {start|finish}
+#
+#   Typically called in the following manner from the lab_start() and
+#   lab_finish() functions of a grading script:
+#
+#     rhel_lab_run_ansible ${grade_verb}
+#
+# WARNING: This function removes all files that start with "index.html",
+#          so be sure not to start any of the student files with that
+#          string.
+#
+# Returns: 0 when exercise start/finish script is downloaded and executed
+#          1 otherwise
+
+function rhel_lab_run_ansible {
+
+  local -r lab_verb=${1}
+  local -r lab_materials="http://materials.example.com/classroom/ansible/${problem_name}"
+  local -r lab_playbook_to_run="${problem_name}-${lab_verb}.yml"
+  local -r tmp_dir="/tmp/${problem_name}"
+  local wget_cmd
+
+  if [[ $# -ne 1 ]] ; then
+    __print_error 'incorrect argument count'
+    return 1
+  elif [[ ${1} != 'start' && ${1} != 'finish' ]] ; then
+    __print_error 'invalid argument, must be "start" or "finish"'
+    return 1
+  fi
+
+  pad ' · Download lab playbooks'
+  # Create new /tmp/problem_name directory and cd there
+  rm -rf ${tmp_dir} ; mkdir -p ${tmp_dir}
+  if ! cd ${tmp_dir} ; then
+    pad ' · Error: unable to create staging directory'
+    print_FAIL ; exit 1
+  fi
+  # Download exercise playbook
+  wget_cmd="wget -q --mirror -np -nH --cut-dirs=3 -P ${tmp_dir} --reject=index.html* ${lab_materials}/"
+  if ${wget_cmd} ; then
+    print_SUCCESS
+    # Run exercise playbook
+    pad " · Run lab ${lab_verb} playbook"
+    if ansible-playbook ${lab_playbook_to_run} & spinner $! 3 ; then
+      cd -
+      rm -rf ${tmp_dir}
+      print_SUCCESS
+    else
+      print_FAIL ; return 1
+    fi
+  else
+    print_FAIL ; return 1
+  fi
+}
+
+
+# Usage: rhel_config_nic SERVER IFACE IPV4ADDR [IPV6ADDR]
+#
+# Returns: 0 when static_IFACE is found and configured, or
+#            when static_IFACE is already configured
+#          1 otherwise
+
+function rhel_config_nic {
+
+  local -r host=${1} iface=${2} ipv4_addr=${3} ipv6_addr=${4}
+  local -r con_name="static_${2}"
+  local cmd1 cmd2 cmd3 cmd4
+
+  if ! ${ssh} ${host} "nmcli con show '${con_name}'"; then
+    pad " · Configuring ${iface} network interface on ${host}"
+    cmd1="nmcli con add con-name '${con_name}' type ethernet ifname ${iface}"
+    cmd2="nmcli con mod '${con_name}' ipv4.addresses '${ipv4_addr}' ipv4.method manual"
+    if [[ $# -eq 4 ]]; then
+      cmd3="nmcli con mod '${con_name}' ipv6.addresses '${ipv6_addr}' ipv6.method manual"
+    else
+      cmd3=':'                # do nothing, except return true
+    fi
+    cmd4="nmcli con up '${con_name}'"
+    if ${ssh} ${host} "${cmd1} && ${cmd2} && ${cmd3} && ${cmd4}"; then
+      print_SUCCESS
+      return 0
+    else
+      print_FAIL
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# Usage: rhel_unconfig_nic SERVER IFACE
+#
+# Returns: 0 when static_IFACE is found and unconfigured
+#          1 otherwise
+
+function rhel_unconfig_nic {
+
+  local -r host=${1} iface=${2} con_name="static_${2}"
+
+  if ${ssh} ${host} "nmcli con show '${con_name}'"; then
+    pad " · Unconfiguring ${iface} network interface on ${host}"
+    if ${ssh} ${host} "nmcli con del '${con_name}'"; then
+      print_SUCCESS
+      return 0
+    else
+      print_FAIL
+      return 1
+    fi
+  fi
+  return 1
+}
+
+
+# Usage: rhel_team_destroy SERVER TEAM
+#
+# Returns: 0 when team is found and destroyed, or
+#            when team is not present
+#          1 otherwise
+
+function rhel_team_destroy {
+
+  local -r host=${1} team=${2}
+  local cmd1 cmd2 cmd3
+
+  if ${ssh} ${host} "nmcli con show ${team}"; then
+    pad " · Removing team interface on ${host}"
+    cmd1="nmcli con del ${team}-port1"
+    cmd2="nmcli con del ${team}-port2"
+    cmd3="nmcli con del ${team}"
+    if ${ssh} ${host} "${cmd1} ; ${cmd2} ; ${cmd3}"; then
+      print_SUCCESS
+      return 0
+    else
+      print_FAIL
+      return 1
+    fi
+  fi
+}
+
+
+# Usage: rhel_bastion_bind
+#
+# Returns: 0 when BIND is installed and configured on bastion, or
+#          0 when BIND is already running on bastion
+#          1 otherwise
+
+function rhel_bastion_bind {
+
+  local -r host='bastion'
+  local -r bind_materials='http://materials.example.com/classroom/bastion-bind'
+  local cmd1 cmd2
+
+  if ${ssh} ${host} 'systemctl --quiet is-enabled dnsmasq'; then
+    pad " · Configuring BIND for DNS on ${host}"
+    # if needed, install the bind RPM
+    cmd1='rpm -q bind'
+    cmd2='yum install -y bind'
+    if ! ${ssh} ${host} "${cmd1} || ${cmd2}"; then
+      print_FAIL ; return 1
+    fi
+    # download zone files (from http://materials/classroom/bastion-bind to /var/named)
+    cmd1="curl -s ${bind_materials}/172.25.250.zone -o /var/named/172.25.250.zone"
+    cmd2="curl -s ${bind_materials}/lab.example.com.zone -o /var/named/lab.example.com.zone"
+    if ! ${ssh} ${host} "${cmd1} && ${cmd2}"; then
+      print_FAIL ; return 1
+    fi
+    # download named.conf (from http://materials/classroom/bastion-bind to /etc)
+    cmd1="curl -s ${bind_materials}/named.conf-rht -o /etc/named.conf"
+    if ! ${ssh} ${host} "${cmd1}"; then
+      print_FAIL ; return 1
+    fi
+    # switch services
+    cmd1='systemctl --now disable dnsmasq'
+    cmd2='systemctl --now enable named'
+    if ! ${ssh} ${host} "${cmd1} && ${cmd2}"; then
+      print_FAIL ; return 1
+    fi
+  else
+    pad " · Warning: BIND already configured on ${host}"
+  fi
+  print_SUCCESS
+  return 0
+}
+
+
+# Usage: rhel_bastion_unbind
+#
+# Returns: 0 when BIND is disabled on bastion, or
+#          0 when BIND is already not running on bastion
+#          1 otherwise
+
+function rhel_bastion_unbind {
+
+  local -r host='bastion'
+  local cmd1 cmd2
+
+  if ${ssh} ${host} 'systemctl --quiet is-enabled named'; then
+    pad " · Restoring original DNS configuration on ${host}"
+    cmd1='systemctl --now disable named'
+    cmd2='systemctl --now enable dnsmasq'
+    if ! ${ssh} ${host} "${cmd1} && ${cmd2}"; then
+      print_FAIL ; return 1
+    fi
+  else
+    pad " · Warning: BIND not configured on ${host}"
+  fi
+  print_SUCCESS
+  return 0
+}
+
+
+# Usage: rhel_erase_bind ${server}
+#
+# Returns: 0 when BIND is successfully uninstalled, or
+#          0 when BIND is already not installed
+#          1 otherwise
+
+function rhel_erase_bind {
+
+  local -r server="${1}"
+  local cmd1 cmd2 cmd3 cmd4 cmd5
+
+  pad " · Removing BIND package from ${server}"
+  if ${ssh} ${server} 'rpm -q --quiet bind'; then
+    cmd1='firewall-cmd --remove-service=dns --permanent'
+    cmd2='firewall-cmd --remove-service=dns'        # this is faster than --reload
+    cmd3='yum -y remove bind'
+    cmd4='rm -f /etc/named*'
+    cmd5='rm -rf /var/named'
+    if ${ssh} ${server} "${cmd1} ; ${cmd2} ; ${cmd3} ; ${cmd4} ; ${cmd5}"; then
+      print_SUCCESS
+    else
+      print_FAIL ; return 1
+    fi
+  else
+    print_SUCCESS
+  fi
+  return 0
+}
+
+
+# Usage: rhel_erase_unbound ${server}
+#
+# Returns: 0 when Unbound is successfully uninstalled, or
+#          0 when Unbound is already not installed
+#          1 otherwise
+
+function rhel_erase_unbound {
+
+  local -r server="${1}"
+  local cmd1 cmd2 cmd3 cmd4
+
+  pad " · Removing Unbound package from ${server}"
+  if ${ssh} ${server} 'rpm -q --quiet unbound'; then
+    cmd1='firewall-cmd --remove-service=dns --permanent'
+    cmd2='firewall-cmd --remove-service=dns'        # faster than --reload
+    cmd3='yum -y remove unbound'
+    cmd4='rm -rf /etc/unbound'
+    if ${ssh} ${server} "${cmd1} ; ${cmd2} ; ${cmd3} ; ${cmd4}"; then
+      print_SUCCESS
+    else
+      print_FAIL ; return 1
+    fi
+  else
+    print_SUCCESS
+  fi
+  return 0
+}
+
+
+# Usage: rhel_backup_network ${server}
+#
+# Returns: 0 when network configuration is successfully backed up, or
+#          0 when a backup already exists
+#          1 otherwise
+
+function rhel_backup_network {
+
+  local -r server="${1}" backup_file="/var/tmp/lab-${problem_name}.tgz"
+  local -r files_to_backup='/etc/sysconfig/network-scripts/ifcfg-* /etc/resolv.conf /etc/hosts /etc/machine-id'
+  local cmd1 cmd2
+
+  pad " · Backing up network configuration on ${server}"
+  cmd1="test -s ${backup_file}"
+  cmd2="tar czf ${backup_file} --xattrs -C / ${files_to_backup}"
+  if ${ssh} ${server} "${cmd1} || ${cmd2}"
+  then
+    print_SUCCESS
+  else
+    print_FAIL ; return 1
+  fi
+  return 0
+}
+
+
+# Usage: rhel_restore_network ${server}
+#
+# Returns: 0 when network configuration is successfully restored, or
+#          0 when a backup already exists
+#          1 otherwise
+
+function rhel_restore_network {
+
+  local -r server="${1}" backup_file="/var/tmp/lab-${problem_name}.tgz"
+  local cmd1 cmd2 cmd3 cmd4
+
+  pad " · Restoring network configuration on ${server}"
+  cmd1="test -s ${backup_file}"
+  cmd2="tar xzf ${backup_file} --xattrs -C /"
+  cmd3="rm -f ${backup_file}"
+  cmd4='nmcli --wait 0 con reload'
+  if ${ssh} ${server} "${cmd1} && ${cmd2}"
+  then
+    ${ssh} ${server} "${cmd3} ; ${cmd4}"
+    print_SUCCESS
+  else
+    print_FAIL ; return 1
+  fi
+  return 0
+}
+
+# vim: ts=4 sw=2

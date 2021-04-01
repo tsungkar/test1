@@ -1,0 +1,176 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     filestorage-smb - grading script for RH358 Providing SMB File Shares
+#                       guided exercise
+#
+# SYNOPSIS
+#     filestorage-smb {start|finish}
+#
+#        start   - prepare the system for starting the lab
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start
+#     or finish for the Providing SMB File Shares guided exercise.
+#
+# CHANGELOG
+#   * Wed May 20 2020 Herve Quatremain <hquatrem@redhat.com>
+#   - original code
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+target_a='servera'
+target_d='serverd'
+smb_share_dir='/smbshare'
+smb_mount_point='/designs'
+sambamount_user='sambamount'
+linux_users=(developer1 operator1)
+linux_groups=(marketing)
+
+# This defines which subcommands are supported (start, grade, etc.).
+# Corresponding lab_COMMAND functions must be defined.
+declare -a valid_commands=(start finish)
+
+
+function lab_start {
+
+  print_header 'Starting lab.'
+
+  print_line "Preparing ${target_a} and ${target_d} for lab exercise work:"
+  print_line
+  host_reachable ${target_a} ${target_d}
+
+  pad " · Backing up /etc/fstab on ${target_a}"
+  if ${ssh} ${target_a} "test -s /var/tmp/lab-${problem_name}-fstab || cp /etc/fstab /var/tmp/lab-${problem_name}-fstab"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Creating the exercise user accounts on ${target_a}"
+  for linux_user in ${linux_users[*]}
+  do
+    ${ssh} ${target_a} "useradd ${linux_user}; echo redhat | passwd --stdin ${linux_user}"
+  done
+  print_SUCCESS
+
+  pad " · Backing up /etc/samba/smb.conf on ${target_d}"
+  if ${ssh} ${target_d} "test -s /var/tmp/lab-${problem_name}-smb.conf || cp /etc/samba/smb.conf /var/tmp/lab-${problem_name}-smb.conf"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+
+function lab_finish {
+
+  print_header "Cleaning up the lab on ${target_a} and ${target_d}:"
+  host_reachable ${target_a} ${target_d}
+
+  pad " · Unmounting the share on ${target_a}"
+  ${ssh} ${target_a} "umount -afl -t cifs && sleep 5"
+  print_SUCCESS
+
+  pad " · Removing the mount point from ${target_a}"
+  ${ssh} ${target_a} "rm -rf ${smb_mount_point}" &
+  print_SUCCESS
+
+  pad " · Restoring /etc/fstab on ${target_a}"
+  ${ssh} ${target_a} "test -s /var/tmp/lab-${problem_name}-fstab && cp /var/tmp/lab-${problem_name}-fstab /etc/fstab ; rm -f /var/tmp/lab-${problem_name}-fstab"
+  print_SUCCESS
+
+  pad " · Removing the credential file from ${target_a}"
+  ${ssh} ${target_a} "rm -f /etc/samba/cred*"
+  print_SUCCESS
+
+  pad " · Removing the packages from ${target_a}"
+  ${ssh} ${target_a} "yum remove -y cifs-utils samba-client"
+  print_SUCCESS
+
+  pad " · Closing the firewall ports on ${target_a}"
+  ${ssh} ${target_a} 'firewall-cmd --remove-service=samba-client --remove-service=samba-dc --remove-service=samba --permanent ; firewall-cmd --remove-port=137/udp --remove-port=138/udp --remove-port=139/tcp --remove-port=445/tcp --permanent ; firewall-cmd --reload'
+  print_SUCCESS
+
+  pad " · Removing the exercise user accounts from ${target_a}"
+  for linux_user in ${linux_users[*]}
+  do
+    ${ssh} ${target_a} "userdel --force --remove ${linux_user}"
+  done
+  print_SUCCESS
+
+  pad " · Removing the exercise groups from ${target_a}"
+  for linux_group in ${linux_groups[*]}
+  do
+    ${ssh} ${target_a} "groupdel ${linux_group}"
+  done
+  print_SUCCESS
+
+  pad " · Stopping the smb and nmb services on ${target_d}"
+  ${ssh} ${target_d} "systemctl disable --now smb.service nmb.service"
+  print_SUCCESS
+
+  pad " · Removing the packages from ${target_d}"
+  ${ssh} ${target_d} "yum remove -y samba samba-libs samba-client"
+  print_SUCCESS
+
+  pad " · Removing the samba password file from ${target_d}"
+  ${ssh} ${target_d} "rm -rf /var/lib/samba/private/*"
+  print_SUCCESS
+
+  pad " · Restoring /etc/samba/smb.conf on ${target_d}"
+  ${ssh} ${target_d} "test -s /var/tmp/lab-${problem_name}-smb.conf && cp /var/tmp/lab-${problem_name}-smb.conf /etc/samba/smb.conf ; rm -f /var/tmp/lab-${problem_name}-smb.conf"
+  print_SUCCESS
+
+  pad " · Removing the shared directory from ${target_d}"
+  ${ssh} ${target_d} "rm -rf ${smb_share_dir}"
+  print_SUCCESS
+
+  pad " · Removing the exercise user accounts from ${target_d}"
+  for linux_user in ${linux_users[*]}
+  do
+    ${ssh} ${target_d} "userdel --force --remove ${linux_user}"
+  done
+  print_SUCCESS
+
+  pad " · Removing the ${sambamount_user} user account from ${target_d}"
+  ${ssh} ${target_d} "userdel --force --remove ${sambamount_user}"
+  print_SUCCESS
+
+  pad " · Removing the exercise groups from ${target_d}"
+  for linux_group in ${linux_groups[*]}
+  do
+    ${ssh} ${target_d} "groupdel ${linux_group}"
+  done
+  print_SUCCESS
+
+  pad " · Removing the SELinux rule from ${target_d}"
+  ${ssh} ${target_d} "semanage fcontext -d -t samba_share_t '/smbshare(/.*)?'"
+  print_SUCCESS
+
+  pad " · Closing the firewall ports on ${target_d}"
+  ${ssh} ${target_d} 'firewall-cmd --remove-service=samba-client --remove-service=samba-dc --remove-service=samba --permanent ; firewall-cmd --remove-port=137/udp --remove-port=138/udp --remove-port=139/tcp --remove-port=445/tcp --permanent ; firewall-cmd --reload'
+  print_SUCCESS
+
+  print_line
+  print_line 'Lab finished.'
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

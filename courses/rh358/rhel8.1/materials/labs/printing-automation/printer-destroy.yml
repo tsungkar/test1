@@ -1,0 +1,17 @@
+---
+- name: Remove a print queue
+  hosts:
+  gather_facts: no
+  become: yes
+  vars:
+    queue_name: "local_print_queue_name"
+  tasks:
+    - name: Check if print queue exists
+      command:
+      register: cmdout
+      ignore_errors: true
+      changed_when: false
+
+    - name: Delete the print queue
+      command:
+      when: cmdout.rc == 0

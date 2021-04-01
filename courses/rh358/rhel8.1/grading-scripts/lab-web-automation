@@ -1,0 +1,544 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-web-automation - start/finish script for RH358
+#
+# SYNOPSIS
+#     lab-web-automation {start|finish}
+#
+# DESCRIPTION
+#     This script performs the start/finish steps for the automation setup of
+#     httpd and nginx on servera and serverb respectfully
+# CHANGELOG
+#   * Mon May 18 2020 Dallas Spohn <dspohn@redhat.com>
+#   - original code
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin
+
+# Initialize and set some variables
+run_as_root='true'
+target_a='servera'
+target_b='serverb'
+reqd_package1='httpd'
+ansible_user=devops
+
+declare -a valid_commands=(start finish)
+
+# This defines which subcommands are supported (start, grade, etc.).
+# Corresponding lab_COMMAND functions must be defined.
+
+function lab_start {
+  # Make sure httpd is not installed
+  print_header "Preparing  ${target_a} and ${target_b} for lab exercise work:"
+  host_reachable ${target_a} ${target_b}
+
+  rhel_install_ansible
+
+  pad " · Deploying the Ansible files on workstation"
+  mkdir -p /home/student/${problem_name}/{solutions,files,templates,group_vars}
+  mkdir -p /home/student/${problem_name}/group_vars/{all,nginx,httpd}
+
+# Create ansible.cfg
+  cat <<EOF > /home/student/${problem_name}/ansible.cfg
+[defaults]
+inventory=inventory
+remote_user=devops
+EOF
+
+# Create inventory
+  cat <<EOF > /home/student/${problem_name}/inventory
+[webservers]
+servera.lab.example.com
+serverb.lab.example.com
+
+[httpd]
+servera.lab.example.com
+
+[nginx]
+serverb.lab.example.com
+EOF
+
+# Create apache.conf.j2
+cat <<EOF > /home/student/${problem_name}/templates/httpd.conf.j2
+<VirtualHost *:443>
+ServerName {{ item }}
+SSLEngine On
+SSLProtocol all -SSLv2 -SSLv3
+SSLCipherSuite HIGH:MEDIUM:!aNull:!MD5
+SSLHonorCipherOrder on
+SSLCertificateFile /etc/pki/tls/certs/{{ item }}.crt
+SSLCertificateKeyFile /etc/pki/tls/private/{{ item }}.key
+SSLCertificateChainFile /etc/pki/tls/certs/{{ cacert_file }}
+DocumentRoot /srv/www/{{ item }}
+</VirtualHost>
+<Directory /srv/www/{{ item }}>
+Require all granted
+</Directory>
+
+<VirtualHost *:80>
+ServerName {{ item }}
+Redirect "/" "https://{{ item }}"
+</VirtualHost>
+
+EOF
+
+# Create NGINX conf file
+# Create index files for httpd
+cat <<EOF > /home/student/${problem_name}/templates/nginx.conf.j2
+server {
+    listen 80 ;
+    server_name {{ item }};
+    return 301 https://\$host\$request_uri;
+}
+server {
+    listen 443 ssl;
+    server_name {{ item }};
+    ssl_certificate /etc/pki/tls/certs/{{ item }}.crt;
+    ssl_certificate_key /etc/pki/tls/private/{{ item }}.key;
+    location / {
+        root /srv/www/{{ item }};
+        index index.html index.htm;
+    }
+}
+
+EOF
+
+# Create index files for httpd
+cat <<EOF > /home/student/${problem_name}/templates/index.html.j2
+<html>
+   <head>
+       <title>Welcome to {{ item }} !</title>
+   </head>
+   <body>
+   <h1>Success! The {{ item }} virtual host is working!</h1>
+   <p>This site is hosted on {{ ansible_facts['fqdn'] }}.</p>
+</body>
+</html>
+
+EOF
+
+#Create defaults file for templates
+cat <<EOF > /home/student/${problem_name}/group_vars/all/default.yml
+---
+httpd_packages:
+  - httpd
+  - mod_ssl
+nginx_packages:
+  - '@nginx:1.16'
+cacert_file: "example-ca.crt"
+EOF
+
+
+cat <<EOF > /home/student/${problem_name}/group_vars/httpd/vars.yml
+web_hosts:
+  - "servera.lab.example.com"
+EOF
+
+cat <<EOF > /home/student/${problem_name}/group_vars/nginx/vars.yml
+web_hosts:
+  - "serverb.lab.example.com"
+EOF
+
+cat <<EOF > /home/student/${problem_name}/deploy_content.yml
+
+- name: Document root exists for web sites
+  file:
+    path: "/srv/www/{{ item }}"
+    state: directory
+    owner: root
+    mode: '0755'
+  loop: "{{ web_hosts }}"
+
+- name: Index test pages are correct
+  template:
+    src: "index.html.j2"
+    dest: "/srv/www/{{ item }}/index.html"
+  loop: "{{ web_hosts }}"
+
+- name: SELinux policy is correct for web site location
+  sefcontext:
+    target: '/srv/www(/.*)?'
+    setype: httpd_sys_content_t
+    state: present
+
+- name: Correct SELinux file context is on web content
+  file:
+    path: /srv/www
+    state: directory
+    recurse: yes
+    follow: no
+    setype: _default
+
+- name: Virtual host TLS certs in place
+  copy:
+    src: "{{ item }}.crt"
+    dest: "/etc/pki/tls/certs"
+  loop: "{{ web_hosts }}"
+
+- name: Virtual host TLS private keys in place
+  copy:
+    src: "{{ item }}.key"
+    dest: "/etc/pki/tls/private"
+    mode: '0600'
+    owner: root
+    group: root
+  loop: "{{ web_hosts }}"
+
+- name: example.com CA cert in place
+  copy:
+    src: "{{ cacert_file }}"
+    dest: "/etc/pki/tls/certs/{{ cacert_file }}"
+
+EOF
+
+  cat <<EOF > /home/student/${problem_name}/solutions/disable_all_webservers.yml
+  - name: Turn off all web servers
+    hosts:
+      - httpd
+      - nginx
+    become: true
+    tasks:
+      - name: Disable all web servers
+        service:
+          name: "{{ item }}"
+          state: stopped
+          enabled: no
+        loop:
+          - httpd
+          - nginx
+EOF
+
+cat <<EOF > /home/student/${problem_name}/site.yml
+- import_playbook: httpd.yml
+- import_playbook: nginx.yml
+EOF
+
+cat <<EOF > /home/student/${problem_name}/solutions/httpd.yml
+---
+- name: Apache HTTP Server web server deployment
+  hosts: httpd
+  become: true
+
+  tasks:
+    - name: Latest software installed for Apache HTTPD
+      yum:
+        name: "{{ httpd_packages }}"
+        state: present
+
+    - name: Web content is in place
+      import_tasks: deploy_content.yml
+
+    - name: Virtual hosts are configured
+      template:
+        src: "httpd.conf.j2"
+        dest: "/etc/httpd/conf.d/{{ item }}.conf"
+      loop: "{{ web_hosts }}"
+
+    - name: Firewall ports are open
+      firewalld:
+        service: "{{ item }}"
+        permanent: yes
+        immediate: yes
+        state: enabled
+      loop:
+        - https
+        - http
+
+    - name: Web server is started and enabled
+      service:
+        name: httpd
+        state: started
+        enabled: yes
+EOF
+
+cat <<EOF > /home/student/${problem_name}/solutions/nginx.yml
+---
+- name: Nginx web server deployment
+  hosts: nginx
+  become: true
+
+  tasks:
+    - name: Latest software installed for nginx
+      yum:
+        name: "{{ nginx_packages }}"
+        state: present
+
+    - name: Web content is in place
+      import_tasks: deploy_content.yml
+
+    - name: Set up nginx serverblock
+      template:
+        src: "nginx.conf.j2"
+        dest: "/etc/nginx/conf.d/{{ item }}.conf"
+      loop: "{{ web_hosts }}"
+
+    - name: Firewall ports are open
+      firewalld:
+        service: "{{ item }}"
+        permanent: yes
+        immediate: yes
+        state: enabled
+      loop:
+        - https
+        - http
+
+    - name: Nginx is enabled and started
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+EOF
+
+cat <<EOF > /home/student/${problem_name}/httpd.yml
+---
+- name: Apache HTTP Server web server deployment
+  hosts: httpd
+  become: true
+
+  tasks:
+    - name: Latest software installed for Apache HTTPD
+      FIXME:
+        name: "{{ httpd_packages }}"
+        state: FIXME
+
+    - name: Web content is in place
+      import_tasks: deploy_content.yml
+
+    - name: Virtual hosts are configured
+      template:
+        src: "httpd.conf.j2"
+        dest: "FIXME"
+      loop: "{{ web_hosts }}"
+
+    - name: Firewall ports are open
+      firewalld:
+        service: "{{ item }}"
+        permanent: yes
+        immediate: yes
+        state: enabled
+      loop:
+        - https
+        - http
+
+    - name: Web server is started and enabled
+      FIXME:
+        name: FIXME
+        state: started
+        enabled: yes
+EOF
+
+cat <<EOF > /home/student/${problem_name}/nginx.yml
+---
+- name: Nginx web server deployment
+  hosts: nginx
+  become: true
+
+  tasks:
+    - name: Latest software installed for nginx
+      FIXME:
+        name: "{{ nginx_packages }}"
+        state: FIXME
+
+    - name: Web content is in place
+      import_tasks: deploy_content.yml
+
+    - name: Set up nginx serverblock
+      template:
+        src: "nginx.conf.j2"
+        dest: "FIXME"
+      loop: "{{ web_hosts }}"
+
+    - name: Firewall ports are open
+      firewalld:
+        service: "{{ item }}"
+        permanent: yes
+        immediate: yes
+        state: enabled
+      loop:
+        - https
+        - http
+
+    - name: Nginx is enabled and started
+      FIXME:
+        name: nginx
+        state: started
+        enabled: yes
+EOF
+ print_SUCCESS
+
+
+
+  #servera
+  pad " · Creating certificate for both webservers"
+  rhel_certs_create servera.lab.example.com \
+      serverb.lab.example.com
+  if [ $? -eq 0 ]
+   then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Copying the certificate to ${problem_name}"
+  cp /etc/pki/CA/example-ca.crt \
+     /home/student/${problem_name}/files/example-ca.crt
+
+  cp /etc/pki/CA/certs/servera.lab.example.com.crt \
+     /etc/pki/CA/private/servera.lab.example.com.key \
+     /home/student/${problem_name}/files/
+
+  cp /etc/pki/CA/certs/serverb.lab.example.com.crt \
+     /etc/pki/CA/private/serverb.lab.example.com.key \
+     /home/student/${problem_name}/files/
+  chown student: /home/student/${problem_name}/files/{servera,serverb}.lab.example.com.{crt,key}
+  print_SUCCESS
+
+  pad " · Copying the CA certificates to ${problem_name}"
+  cp /etc/pki/CA/cacert.pem /home/student/${problem_name}/files/
+  chown -R student: /home/student/${problem_name}
+  print_SUCCESS
+
+  pad " · Creating the www alias for ${target_a}"
+  rhel_dns_cname_create servera.lab.example.com,serverb.lab.example.com
+
+  if [ $? -eq 0 ]
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Ensuring HTTPD package is not present:"
+  if ${ssh} ${target} "rpm -q httpd"
+  then
+    if ${ssh} ${target} "yum remove -y httpd"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    print_SUCCESS
+  fi
+
+  # Make sure http service is removed from firewall
+  pad " · Ensuring http and https services are removed from firewall:"
+  ${ssh} ${target} "firewall-cmd --permanent --remove-service=http --remove-service=https"
+  ${ssh} ${target} "firewall-cmd --reload"
+  print_SUCCESS
+
+  print_line
+}
+
+function lab_finish {
+
+  pad " · Removing the www CNAMES"
+  rhel_dns_cname_delete
+  if [ $? -eq 0 ]
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Removing the certificates for servera"
+  # Always succeed
+  rhel_certs_delete servera.lab.example.com \
+    serverb.lab.example.com
+  print_SUCCESS
+
+
+  # Make sure httpd is not installed
+  pad " · Ensuring ${reqd_package1} is removed:"
+  if ${ssh} ${target_a} "rpm -q ${reqd_package1}"
+  then
+    if ${ssh} ${target_a} "yum remove -y ${reqd_package1}"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    print_SUCCESS
+  fi
+
+  # Remove directories created with the exercise. /srv/www/
+  pad " · Removing virtual server directories:"
+  ${ssh} ${target_a} "rm -rf /srv/www/"
+  print_SUCCESS
+
+  # Remove directories created with the exercise. /etc/httpd/conf.d/serverb.conf*
+  pad " · Removing configuration files:"
+  ${ssh} ${target_a} "rm -rf /etc/httpd/conf.d/servera.conf"
+  print_SUCCESS
+
+  # Removing certs files from serverb
+  pad " · Ensuring that the certs for httpd is cleaned up."
+  ${ssh} ${target_a} "rm /etc/pki/tls/certs/servera.lab.example.com.crt"
+  print_SUCCESS
+
+  # Removing keys files from serverb
+  pad " · Ensuring that the key for httpd is cleaned up."
+  ${ssh} ${target_a} "rm /etc/pki/tls/private/servera.lab.example.com.key"
+  print_SUCCESS
+
+  # Make sure http service is removed from firewall
+  pad " · Ensuring http service is removed from firewall:"
+  ${ssh} ${target_a} "firewall-cmd --permanent --remove-service=http"
+  ${ssh} ${target_a} "firewall-cmd --reload"
+  print_SUCCESS
+
+  # Removing certs files from serverb
+  pad " · Ensuring that the certs for NGINX is cleaned up."
+  ${ssh} ${target_b} "rm /etc/pki/tls/certs/serverb.lab.example.com.crt"
+  print_SUCCESS
+
+  # Removing keys files from serverb
+  pad " · Ensuring that the key for NGINX is cleaned up."
+  ${ssh} ${target_b} "rm /etc/pki/tls/private/serverb.lab.example.com.key"
+  print_SUCCESS
+
+  # Removing configuration files from serverb
+  pad " · Removing the root directory for NGINX."
+  ${ssh} ${target_b} "rm -rf /srv/www/"
+  print_SUCCESS
+
+  # Removing configuration files from serverb
+  pad " · Ensuring that the configuration for NGINX is cleaned up."
+  ${ssh} ${target_b} "rm /etc/nginx/conf.d/*"
+  print_SUCCESS
+
+  # Remove the SELinux file context
+  pad " · Ensuring that the SELinux file context is removed."
+  ${ssh} ${target_b} "semanage fcontext -d -t httpd_sys_content_t '/srv/nginx(/.*)?'"
+  print_SUCCESS
+
+  # Resetting the module to for Nginx.
+  pad " · Resetting the AppStream Module for Nginx."
+  ${ssh} ${target_b} "yum module reset -y nginx"
+  print_SUCCESS
+
+  # Make sure http service is removed from firewall
+  pad " · Ensuring http service is removed from firewall:"
+  ${ssh} ${target_b} "firewall-cmd --permanent --remove-service=http --remove-service=https"
+  ${ssh} ${target_b} "firewall-cmd --reload"
+  print_SUCCESS
+
+  # Resetting the module to for Nginx.
+  pad " · Removing Nginx."
+  ${ssh} ${target_b} "yum remove -y nginx"
+  print_SUCCESS
+
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

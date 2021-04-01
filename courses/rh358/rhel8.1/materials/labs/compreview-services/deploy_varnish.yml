@@ -1,0 +1,55 @@
+---
+- name: Ensure Varnish is deployed
+  hosts: serverb.lab.example.com
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: the varnish package is installed
+      yum:
+        name: varnish
+        state: present
+
+    - name: the systemd drop-in directory exists
+      file:
+        path: /etc/systemd/system/varnish.service.d
+        state: directory
+
+    - name: the varnish systemd service configuration file is deployed
+      copy:
+        # You need to create that configuration file
+        src: files/port.conf
+        dest: /etc/systemd/system/varnish.service.d/port.conf
+      notify:
+        - reload systemd
+        - restart varnish
+
+    - name: the Varnish configuration file is deployed
+      copy:
+        # You need to complete that configuration file
+        src: files/default.vcl
+        dest: /etc/varnish/default.vcl
+      notify: restart varnish
+
+    - name: the varnish service is started and enabled
+      service:
+        name: varnish
+        state: started
+        enabled: yes
+
+    - name: the port 9000 is opened in the firewall
+      firewalld:
+        port: 9000/tcp
+        state: enabled
+        immediate: yes
+        permanent: yes
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart varnish
+      service:
+        name: varnish
+        state: restarted

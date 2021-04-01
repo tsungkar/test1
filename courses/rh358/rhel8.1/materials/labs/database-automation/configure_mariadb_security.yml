@@ -1,0 +1,28 @@
+---
+- name: Securing MariaDB
+  hosts: db_servers
+  become: yes
+
+  tasks:
+    - name: Assign password to MariaDB root user
+      FIXME:
+        name: root
+        host_all: yes
+        update_password: FIXME
+        password: "{{ pw }}"
+
+    - name: Authentication credentials copied to root home directory
+      FIXME:
+        src: files/my.cnf
+        dest: FIXME
+
+    - name: Remove anonymous user accounts
+      mysql_user:
+        name: FIXME
+        host_all: yes
+        state: FIXME
+
+    - name: Remove test database
+      FIXME:
+        name: FIXME
+        state: FIXME

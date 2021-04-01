@@ -1,0 +1,39 @@
+---
+- name: Install cache only nameserver
+  hosts: caching_dns
+# become: yes
+
+  tasks:
+    - name: Install cache only nameserver
+      yum:
+        name: unbound
+        state: present
+
+    - name: Create configuration file on caching server host
+      copy:
+        src: files/unbound/unbound.conf
+        dest: /etc/unbound/unbound.conf
+        owner: root
+        group: root
+        mode: 0644
+      notify:
+        - restart_unbound
+
+    - name: Allow dns service on firewall
+      firewalld:
+        service: dns
+        state: enabled
+        immediate: yes
+        permanent: yes
+
+    - name: Ensure unbound is running and enabled
+      service:
+        name: unbound
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: restart_unbound
+      service:
+        name: unbound
+        state: restarted

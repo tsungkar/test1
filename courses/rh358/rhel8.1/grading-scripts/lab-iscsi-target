@@ -1,0 +1,117 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     iscsi-target - grading script for RH358 Providing iSCSI Storage guided
+#                    exercise
+#
+# SYNOPSIS
+#     iscsi-target {start|finish}
+#
+#        start   - prepare the system for starting the lab
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start
+#     or finish for the Providing iSCSI Storage guided exercise.
+#
+# CHANGELOG
+#   * Mon May 11 2020 Herve Quatremain <hquatrem@redhat.com>
+#   - original code
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+target='serverd'
+second_disk_device='vdb'
+
+# This defines which subcommands are supported (start, grade, etc.).
+# Corresponding lab_COMMAND functions must be defined.
+declare -a valid_commands=(start finish)
+
+
+
+function disk_cleanup {
+  for i in {5..1}
+  do
+    if ${ssh} ${target} "test -b /dev/${second_disk_device}$i"
+    then
+      ${ssh} ${target} "umount -l /dev/${second_disk_device}$i"
+      ${ssh} ${target} "swapoff /dev/${second_disk_device}$i"
+      ${ssh} ${target} "dd if=/dev/zero of=/dev/${second_disk_device}$i bs=512 count=10"
+      ${ssh} ${target} "parted --script /dev/${second_disk_device} rm $i"
+    fi
+  done
+  ${ssh} ${target} "wipefs --all --force /dev/${second_disk_device}"
+  ${ssh} ${target} "test -b /dev/${second_disk_device} && dd if=/dev/zero of=/dev/${second_disk_device} bs=1024 count=2048"
+}
+
+
+function lab_start {
+
+  print_header 'Starting lab.'
+
+  print_line "Preparing ${target} for lab exercise work:"
+  print_line
+  host_reachable ${target}
+
+  pad " · Cleaning up spare disk ${second_disk_device} on ${target}"
+  disk_cleanup
+  print_SUCCESS
+
+  pad " · Deploying the help file on ${target}"
+  if ${ssh} ${target} "mkdir -p /root/${problem_name}"
+  then
+    cat <<EOF | ${ssh} ${target} "cat > /root/${problem_name}/iscsi.txt"
+   Target IQN: iqn.2014-06.com.example:serverd
+Target portal: 172.25.250.13 (port 3260)
+Initiator IQN: iqn.2014-06.com.example:servera
+EOF
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+
+function lab_finish {
+
+  print_header "Cleaning up the lab on ${target}:"
+  host_reachable ${target}
+
+  pad " · Removing the help file from ${target}"
+  ${ssh} ${target} "rm -rf /root/${problem_name}"
+  print_SUCCESS
+
+  pad " · Closing the firewall port on ${target}"
+  ${ssh} ${target} 'firewall-cmd --remove-service=iscsi-target --permanent ; firewall-cmd --remove-port=3260/tcp --permanent ; firewall-cmd --reload'
+  print_SUCCESS
+
+  pad " · Cleaning up the target on ${target}"
+  ${ssh} ${target} "targetcli clearconfig confirm=True"
+  print_SUCCESS
+
+  pad " · Removing the targetcli package from ${target}"
+  ${ssh} ${target} "yum remove -y targetcli target-restore ; rm -rf /etc/target /var/target"
+  print_SUCCESS
+
+  pad " · Cleaning up spare disk ${second_disk_device} on ${target}"
+  disk_cleanup
+  print_SUCCESS
+
+  print_line
+  print_line 'Lab finished.'
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

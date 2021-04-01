@@ -1,0 +1,348 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-dhcp-ipv6config - grading script for RH358 Configuring IPv6 Address
+#                           Assignment guided exercise
+#
+# SYNOPSIS
+#     lab-dhcp-ipv6config {start|finish}
+#
+#        start   - prepare the system for starting the lab
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start or finish for
+#     the RH358 Configuring IPv6 Address Assignment guided exercise.
+#
+# CHANGELOG
+#   * Tue Mar 24 2020 Herve Quatremain <hquatrem@redhat.com>
+#   - original code
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+
+prefix_secondary='fde2:6494:1e09:2'
+
+# MAC address of the first/main interface
+# All the other interfaces are disabled by the lab_start() function
+mac_a='52:54:00:00:fa:0a'
+mac_b='52:54:00:00:fa:0b'
+mac_c='52:54:00:00:fa:0c'
+mac_d='52:54:00:00:fa:0d'
+
+target_a='servera'
+target_b='serverb'
+target_c='serverc'
+target_d='serverd'
+
+router='serverd'
+mac_secondary_router='52:54:00:01:fa:0d'
+IP_secondary_router="${prefix_secondary}::d"
+
+files_to_backup="/etc/sysconfig/network-scripts/ifcfg-* /etc/resolv.conf /etc/hosts /etc/machine-id"
+
+# This defines which subcommands are supported (start, grade, etc.).
+# Corresponding lab_COMMAND functions must be defined.
+declare -a valid_commands=(start finish)
+
+
+function lab_start {
+
+  print_header 'Starting lab.'
+
+  print_line "Preparing ${target_a}, ${target_b}, ${target_c}, and ${target_d} for lab exercise work:"
+  print_line
+  host_reachable ${target_a} ${target_b} ${target_c} ${target_d}
+
+  for target_mac in ${target_a},${mac_a} ${target_b},${mac_b} ${target_c},${mac_c} ${target_d},${mac_d}
+  do
+    target=${target_mac%%,*}
+    mac=${target_mac##*,}
+
+    # Disabling autoconnect on all the connections associated with the second
+    # and third network interfaces.  This way, we make sure that those
+    # interfaces will not pickup a DHCP lease as soon as the DHCP server goes up.
+    pad " · Deactivating the secondary interfaces on ${target}"
+
+    # Retrieving all the interface names but skip lo and the main interface
+    for INTERFACE in $(${ssh} ${target} 'ip -brief link show' | awk -v MAC=${mac} 'BEGIN { IGNORECASE = 1;} $1 !~ /lo/ && $3 != MAC { print $1}')
+    do
+      # For all the NetworkManager connections associated with the interface,
+      # disable autoconnect and stop the connection
+      for CON in $(${ssh} ${target} 'nmcli --get-values UUID connection show')
+      do
+        ${ssh} ${target} "nmcli --get-values connection.interface-name,GENERAL.DEVICES con show '${CON}'" | grep -wq "${INTERFACE}"
+        if [ $? -eq 0 ]
+        then
+          ${ssh} ${target} "nmcli con mod '${CON}' connection.autoconnect no ; nmcli --wait 0 con down '${CON}'"
+        fi
+      done
+      ${ssh} ${target} "nmcli dev dis ${INTERFACE}"
+    done
+    print_SUCCESS
+
+    pad " · Backing up network configuration on ${target}"
+    if ${ssh} ${target} "test -s /var/tmp/lab-${problem_name}.tgz || tar zcf /var/tmp/lab-${problem_name}.tgz --xattrs -C / ${files_to_backup}"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    pad " · Generating a new machine ID on ${target}"
+    if ${ssh} ${target} 'rm -f /etc/machine-id ; systemd-machine-id-setup ; test -s /etc/machine-id'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    pad " · Restarting NetworkManager on ${target}"
+    if ${ssh} ${target} 'systemctl restart NetworkManager'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  done
+
+
+  #
+  # Router: configuring the IPv6 layer
+  #
+
+
+  pad " · Setting the IPv6 address on ${router}"
+  interface=$(${ssh} ${router} 'nmcli --get-values GENERAL.HWADDR,GENERAL.DEVICE --escape no device show' | grep -i -A1 "${mac_secondary_router}" | tail -n 1)
+  if [ -z "${interface}" ]
+  then
+    print_FAIL
+  else
+    if ! ${ssh} ${router} "nmcli con add con-name ${problem_name} type ethernet ifname ${interface} ipv6.method manual ipv6.addresses ${IP_secondary_router}/64 && nmcli con up ${problem_name}"
+    then
+      print_FAIL
+    else
+      print_SUCCESS
+    fi
+  fi
+
+  pad " · Configuring IPv6 forwarding on ${router}"
+  if ${ssh} ${router} "sysctl -w net.ipv6.conf.all.forwarding=1"
+  then
+    ${ssh} ${router} "echo net.ipv6.conf.all.forwarding=1 > /etc/sysctl.d/${problem_name}.conf"
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+
+  #
+  # Router: installing and configuring dnsmasq to provide some IPv6 records
+  #
+
+
+  pad " · Installing dnsmasq and radvd on ${router}"
+  if ${ssh} ${router} "yum -y install dnsmasq radvd"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Configuring dnsmasq on ${router}"
+  cat <<EOF | ${ssh} ${router} "cat > /etc/dnsmasq.d/${problem_name}.conf"
+no-resolv
+server=172.25.250.254
+
+# IPv6 on the "private IPv6" network
+# Those definitions also create the backend.lab.example.com
+# domain in dnsmasq
+host-record=servera.backend.lab.example.com,${prefix_secondary}::a
+host-record=serverb.backend.lab.example.com,${prefix_secondary}::b
+host-record=serverc.backend.lab.example.com,${prefix_secondary}::c
+host-record=serverd.backend.lab.example.com,${prefix_secondary}::d
+EOF
+  print_SUCCESS
+
+  pad " · Configuring firewall ports on ${router}"
+  ${ssh} ${router} "firewall-cmd --add-service=dns ; firewall-cmd --add-service=dns --permanent"
+  print_SUCCESS
+
+  pad " · Starting and enabling dnsmasq on ${router}"
+  if ${ssh} ${router} "systemctl enable --now dnsmasq.service"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+
+  #
+  # Router: configuring radvd
+  #
+
+
+  pad " · Configuring radvd on ${router}"
+  interface=$(${ssh} ${router} 'nmcli --get-values GENERAL.HWADDR,GENERAL.DEVICE --escape no device show' | grep -i -A1 "${mac_secondary_router}" | tail -n 1)
+  if [ -z "${interface}" ]
+  then
+    print_FAIL
+  else
+    cat <<EOF | ${ssh} ${router} "cat > /etc/radvd.conf"
+interface ${interface}
+{
+  AdvSendAdvert on;
+  AdvManagedFlag on;
+  AdvOtherConfigFlag on;
+  MaxRtrAdvInterval 60;
+};
+EOF
+    print_SUCCESS
+  fi
+
+  pad " · Starting and enabling radvd on ${router}"
+  if ${ssh} ${router} "systemctl enable --now radvd.service"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+
+  #
+  # servera: sample configuration files
+  #
+
+
+  pad " · Deploying the sample DHCP configuration on ${target_a}"
+  if ${ssh} ${target_a} "mkdir -p /root/${problem_name}"
+  then
+    cat <<EOF  | ${ssh} ${target_a} "cat > /root/${problem_name}/addresses"
+       prefix: ${prefix_secondary}::/64
+ servera IPv6: ${prefix_secondary}::a/64
+ serverb IPv6: ${prefix_secondary}::b/64
+ serverc IPv6: ${prefix_secondary}::c/64
+ serverd IPv6: ${prefix_secondary}::d/64
+  range start: ${prefix_secondary}::20
+    range end: ${prefix_secondary}::60
+EOF
+    ${ssh} ${target_a} "echo ${prefix_secondary}::/64 > /root/${problem_name}/IPv6-prefix"
+    cat <<EOF | ${ssh} ${target_a} "cat > /root/${problem_name}/dhcpd-1.conf"
+authoritative;
+
+subnet6 ${prefix_secondary}::/64 {
+  range6 ${prefix_secondary}::20 ${prefix_secondary}::60;
+  option dhcp6.name-servers ${IP_secondary_router};
+  option dhcp6.domain-search "backend.lab.example.com";
+  default-lease-time 600;
+  max-lease-time 7200;
+}
+EOF
+    cat <<EOF | ${ssh} ${target_a} "cat > /root/${problem_name}/dhcpd-2.conf"
+authoritative;
+
+subnet6 ${prefix_secondary}::/64 {
+  range6 ${prefix_secondary}::20 ${prefix_secondary}::60;
+  option dhcp6.name-servers ${IP_secondary_router};
+  option dhcp6.domain-search "backend.lab.example.com";
+  default-lease-time 600;
+  max-lease-time 7200;
+}
+
+host serverc {
+  host-identifier option dhcp6.client-id FIXME;
+  fixed-address6 ${prefix_secondary}::0451;
+}
+EOF
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+
+function lab_finish {
+
+  print_header "Cleaning up the lab on ${target_a}, ${target_b}, ${target_c}, and ${target_d}:"
+  host_reachable ${target_a} ${target_b} ${target_c} ${target_d}
+
+  pad " · Removing the dnsmasq and radvd packages from ${router}"
+  ${ssh} ${router} 'yum remove -y dnsmasq radvd'
+  print_SUCCESS
+
+  pad " · Closing the firewall port on ${router}"
+  ${ssh} ${router} 'firewall-cmd --remove-service=dns --remove-service=dhcp --remove-service=dhcpv6 --permanent ; firewall-cmd --remove-service=dns --remove-service=dhcp --remove-service=dhcpv6'
+  print_SUCCESS
+
+  pad " · Cleaning up configuration files on ${router}"
+  ${ssh} ${router} "rm -rf /etc/sysctl.d/${problem_name}.conf /etc/dnsmasq* /var/lib/dnsmasq /etc/radvd.conf*"
+  print_SUCCESS
+
+  pad " · Removing the IPv6 address from ${router}"
+  ${ssh} ${router} "nmcli --wait 10 con down ${problem_name} ; nmcli --wait 10 con delete ${problem_name}"
+  print_SUCCESS
+
+  for target_mac in ${target_b},${mac_b} ${target_c},${mac_c} ${target_d},${mac_d} ${target_a},${mac_a}
+  do
+    target=${target_mac%%,*}
+    mac=${target_mac##*,}
+
+    # Removing all the connections except the connection associated with the
+    # first/main interface
+    pad " · Deactivating the secondary interfaces on ${target}"
+
+    # Retrieving all the interface names but skip lo and the main interface
+    for INTERFACE in $(${ssh} ${target} 'ip -brief link show' | awk -v MAC=${mac} 'BEGIN { IGNORECASE = 1;} $1 !~ /lo/ && $3 != MAC { print $1}')
+    do
+      # For all the NetworkManager connections associated with the interface,
+      # stop and delete the connection
+      for CON in $(${ssh} ${target} 'nmcli --get-values UUID connection show')
+      do
+        ${ssh} ${target} "nmcli --get-values connection.interface-name,GENERAL.DEVICES con show '${CON}'" | grep -wq "${INTERFACE}"
+        if [ $? -eq 0 ]
+        then
+          ${ssh} ${target} "nmcli --wait 10 con down '${CON}' ; nmcli --wait 10 con delete '${CON}'"
+        fi
+      done
+    done
+    print_SUCCESS
+
+    pad " · Restoring network configuration on ${target}"
+    ${ssh} ${target} "test -s /var/tmp/lab-${problem_name}.tgz && tar xf /var/tmp/lab-${problem_name}.tgz --xattrs -C / ; rm -f /var/tmp/lab-${problem_name}.tgz; nmcli --wait 0 con reload"
+    print_SUCCESS
+  done
+
+  pad " · Removing the dhcp-server and radvd packages from ${target_a}"
+  ${ssh} ${target_a} 'yum remove -y dhcp-server radvd'
+  print_SUCCESS
+
+  pad " · Closing the firewall port on ${target_a}"
+  ${ssh} ${target_a} 'firewall-cmd --remove-service=dhcp --remove-service=dhcpv6 --permanent ; firewall-cmd --remove-service=dhcp --remove-service=dhcpv6'
+  print_SUCCESS
+
+  pad " · Cleaning up DHCP configuration on ${target_a}"
+  ${ssh} ${target_a} 'rm -rf /etc/dhcp/dhcpd* /etc/sysconfig/dhcpd /var/lib/dhcpd'
+  print_SUCCESS
+
+  pad " · Cleaning up the sample DHCP configuration on ${target_a}"
+  ${ssh} ${target_a} "rm -rf /root/${problem_name}"
+  print_SUCCESS
+
+  print_line
+  print_line 'Lab finished.'
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

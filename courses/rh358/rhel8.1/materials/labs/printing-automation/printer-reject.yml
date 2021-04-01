@@ -1,0 +1,17 @@
+---
+- name: Configure a print queue to reject jobs
+  hosts:
+  gather_facts: no
+  become: yes
+  vars:
+    queue_name: "local_print_queue_name"
+  tasks:
+    - name: Confirm the print queue exists
+      command:
+      register: cmdout
+      ignore_errors: true
+      changed_when: false
+
+    - name: Tune the print queue to reject jobs
+      command:
+      when: cmdout.rc == 0

@@ -1,0 +1,547 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     optimizeweb-automation - grading script for RH358 Automating Web Service
+#                              Optimization guided exercise.
+#
+# SYNOPSIS
+#     optimizeweb-automation {start|finish}
+#
+#        start   - prepare the system for starting the lab
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start or finish
+#     for the Automating Web Service Optimization guided exercise.
+#
+# CHANGELOG
+#   * Tue Apr 21 2020 Herve Quatremain <hquatrem@redhat.com>
+#   - original code
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+target_a='servera'
+target_c='serverc'
+target_d='serverd'
+
+# This defines which subcommands are supported (start, grade, etc.).
+# Corresponding lab_COMMAND functions must be defined.
+declare -a valid_commands=(start finish)
+
+
+function lab_start {
+
+  print_header 'Starting lab.'
+
+  print_line "Preparing ${target_a}, ${target_c}, and ${target_d} for lab exercise work:"
+  print_line
+  host_reachable ${target_a} ${target_c} ${target_d}
+
+  if [ -e "/home/student/${problem_name}" ]
+  then
+    pad " · Saving existing ~/${problem_name}"
+    if mv /home/student/${problem_name} /home/student/${problem_name}.$(date +%m-%d-%H:%M:%S)
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  rhel_install_ansible
+
+  pad " · Deploying the Ansible files on workstation"
+  mkdir -p /home/student/${problem_name}/files
+  cat <<'EOF' > /home/student/${problem_name}/files/haproxy.cfg
+#---------------------------------------------------------------------
+# Example configuration for a possible web application.  See the
+# full configuration options online.
+#
+#   https://www.haproxy.org/download/1.8/doc/configuration.txt
+#
+#---------------------------------------------------------------------
+
+#---------------------------------------------------------------------
+# Global settings
+#---------------------------------------------------------------------
+global
+    # to have these messages end up in /var/log/haproxy.log you will
+    # need to:
+    #
+    # 1) configure syslog to accept network log events.  This is done
+    #    by adding the '-r' option to the SYSLOGD_OPTIONS in
+    #    /etc/sysconfig/syslog
+    #
+    # 2) configure local2 events to go to the /var/log/haproxy.log
+    #   file. A line like the following can be added to
+    #   /etc/sysconfig/syslog
+    #
+    #    local2.*                       /var/log/haproxy.log
+    #
+    log         127.0.0.1 local2
+
+    chroot      /var/lib/haproxy
+    pidfile     /var/run/haproxy.pid
+    maxconn     4000
+    user        haproxy
+    group       haproxy
+    daemon
+
+    # turn on stats unix socket
+    stats socket /var/lib/haproxy/stats level admin
+
+    # utilize system-wide crypto-policies
+    ssl-default-bind-ciphers PROFILE=SYSTEM
+    ssl-default-server-ciphers PROFILE=SYSTEM
+
+#---------------------------------------------------------------------
+# common defaults that all the 'listen' and 'backend' sections will
+# use if not designated in their block
+#---------------------------------------------------------------------
+defaults
+    mode                    http
+    log                     global
+    option                  httplog
+    option                  dontlognull
+    option http-server-close
+#    option forwardfor       except 127.0.0.0/8
+    option                  redispatch
+    retries                 3
+    timeout http-request    10s
+    timeout queue           1m
+    timeout connect         10s
+    timeout client          1m
+    timeout server          1m
+    timeout http-keep-alive 10s
+    timeout check           10s
+    maxconn                 3000
+
+frontend http-proxy
+    bind *:443 ssl crt /etc/pki/haproxy/haproxy.pem
+    http-request add-header X-Forwarded-Proto https
+    default_backend classroom-web-farm
+
+backend classroom-web-farm
+    balance roundrobin
+    server serverc.lab.example.com 172.25.250.12:6081 send-proxy-v2 check inter 5s
+    server serverd.lab.example.com 172.25.250.13:6081 send-proxy-v2 check inter 5s
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/files/port.conf
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/varnishd -a :80 -a :6081,PROXY -f /etc/varnish/default.vcl -s malloc,256m
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/inventory
+[lb_servers]
+servera.lab.example.com
+
+[web_servers]
+serverc.lab.example.com
+serverd.lab.example.com
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/site.yml
+---
+- name: Deploy HAProxy
+  import_playbook: deploy_haproxy.yml
+
+- name: Deploy Varnish
+  import_playbook: deploy_varnish.yml
+
+- name: Deploy Web Server
+  import_playbook: deploy_apache.yml
+
+- name: Deploy Web Content
+  import_playbook: deploy_webcontent.yml
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/ansible.cfg
+[defaults]
+inventory=inventory
+remote_user=devops
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/deploy_apache.yml
+---
+# Deploy the Apache HTTP Server and configure it to listen on port 8080.
+# The service can only be accessed from localhost.
+- name: Ensure Apache HTTP Server is deployed
+  hosts: web_servers
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: the httpd package is installed
+      yum:
+        name: httpd
+        state: present
+
+    - name: httpd is configured to listen on port 8080
+      lineinfile:
+        path: /etc/httpd/conf/httpd.conf
+        regexp: '^Listen '
+        insertafter: '^#Listen '
+        line: Listen 8080
+      notify: restart httpd
+
+    - name: the httpd service is started and enabled
+      service:
+        name: httpd
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: restart httpd
+      service:
+        name: httpd
+        state: restarted
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/deploy_haproxy.yml
+---
+- name: Ensure HAProxy is deployed
+  hosts: servera.lab.example.com
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: the haproxy package is installed
+      yum:
+        name: haproxy
+        state: present
+
+    - name: the /etc/pki/haproxy directory exists
+      file:
+        path: /etc/pki/haproxy
+        state: directory
+        owner: root
+        mode: '700'
+
+    - name: the SSL file for HTTPS termination is deployed
+      assemble:
+        src: files
+        remote_src: false
+        regexp: "^servera\\.lab\\.example\\.com\\.(crt|key)$"
+        dest: /etc/pki/haproxy/haproxy.pem
+      notify: restart haproxy
+
+    - name: the HAProxy configuration file is deployed
+      copy:
+        src: files/haproxy.cfg
+        dest: /etc/haproxy/haproxy.cfg
+      notify: restart haproxy
+
+    - name: SELinux allows HAProxy to connect to remote port 6081
+      seboolean:
+        name: haproxy_connect_any
+        state: true
+        persistent: true
+
+    - name: the haproxy service is started and enabled
+      service:
+        name: haproxy
+        state: started
+        enabled: yes
+
+    - name: the https firewall service is opened
+      firewalld:
+        service: https
+        state: enabled
+        immediate: yes
+        permanent: yes
+
+  handlers:
+    - name: restart haproxy
+      service:
+        name: haproxy
+        state: restarted
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/update_webcontent.yml
+---
+- name: Ensure new web content is deployed
+  hosts: web_servers
+  gather_facts: false
+  become: true
+  serial: 1
+
+  tasks:
+    - name: the web server is removed from service during the update
+      haproxy:
+        socket: ## FIXME ##
+        state: disabled
+        backend: ## FIXME ##
+        host: "{{ inventory_hostname }}"
+      delegate_to: servera.lab.example.com
+
+    - name: the new content is deployed
+      synchronize:
+        src: "new_web_content/{{ inventory_hostname }}/"
+        dest: /var/www/html
+        delete: true
+      notify: Varnish Cache is clean
+
+  post_tasks:
+    - name: Smoke Test - Ensure HTTP 200 OK
+      uri:
+        url: "http://localhost"
+        status_code: 200
+
+    # If the test fails, servers are not re-enabled
+    # in the load balancers, and the update process halts.
+    - name: the healthy web server is enabled in HAProxy
+      haproxy:
+        socket: ## FIXME ##
+        state: enabled
+        backend: ## FIXME ##
+        host: "{{ inventory_hostname }}"
+      delegate_to: servera.lab.example.com
+
+  handlers:
+    - name: Varnish Cache is clean
+      service:
+        name: varnish
+        state: restarted
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/reset_webcontent.yml
+---
+- name: Ensure the web content is reverted to its original version
+  hosts: web_servers
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: the original web content is deployed
+      copy:
+        content: "This is {{ inventory_hostname }}\n"
+        dest: /var/www/html/index.html
+      notify: Varnish Cache is clean
+
+  handlers:
+    - name: Varnish Cache is clean
+      service:
+        name: varnish
+        state: restarted
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/deploy_webcontent.yml
+---
+- name: Ensure the web content is deployed
+  hosts: web_servers
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: the web content is deployed
+      copy:
+        content: "This is {{ inventory_hostname }}\n"
+        dest: /var/www/html/index.html
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/deploy_varnish.yml
+---
+- name: Ensure Varnish is deployed
+  hosts: web_servers
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: the varnish package is installed
+      yum:
+        name: varnish
+        state: present
+
+    - name: the systemd drop-in directory exists
+      file:
+        path: /etc/systemd/system/varnish.service.d
+        state: directory
+
+    - name: the varnish systemd service configuration file is deployed
+      copy:
+        src: files/port.conf
+        dest: /etc/systemd/system/varnish.service.d/port.conf
+      notify:
+        - reload systemd
+        - restart varnish
+
+    - name: the varnish service is started and enabled
+      service:
+        name: varnish
+        state: started
+        enabled: yes
+
+    - name: the port 6081 is opened in the firewall
+      firewalld:
+        port: 6081/tcp
+        state: enabled
+        immediate: yes
+        permanent: yes
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart varnish
+      service:
+        name: varnish
+        state: restarted
+EOF
+
+  mkdir -p /home/student/${problem_name}/new_web_content/serverc.lab.example.com
+  cat <<'EOF' > /home/student/${problem_name}/new_web_content/serverc.lab.example.com/index.html
+This is serverc.lab.example.com version 2
+EOF
+
+  mkdir -p /home/student/${problem_name}/new_web_content/serverd.lab.example.com
+  cat <<'EOF' > /home/student/${problem_name}/new_web_content/serverd.lab.example.com/index.html
+This is serverd.lab.example.com version 2
+EOF
+
+  mkdir -p /home/student/${problem_name}/solution
+  cat <<'EOF' > /home/student/${problem_name}/solution/update_webcontent.yml
+---
+- name: Ensure new web content is deployed
+  hosts: web_servers
+  gather_facts: false
+  become: true
+  serial: 1
+
+  tasks:
+    - name: the web server is removed from service during the update
+      haproxy:
+        socket: /var/lib/haproxy/stats
+        state: disabled
+        backend: classroom-web-farm
+        host: "{{ inventory_hostname }}"
+      delegate_to: servera.lab.example.com
+
+    - name: the new content is deployed
+      synchronize:
+        src: "new_web_content/{{ inventory_hostname }}/"
+        dest: /var/www/html
+        delete: true
+      notify: Varnish Cache is clean
+
+  post_tasks:
+    - name: Smoke Test - Ensure HTTP 200 OK
+      uri:
+        url: "http://localhost"
+        status_code: 200
+
+    # If the test fails, servers are not re-enabled
+    # in the load balancers, and the update process halts.
+    - name: the healthy web server is enabled in HAProxy
+      haproxy:
+        socket: /var/lib/haproxy/stats
+        state: enabled
+        backend: classroom-web-farm
+        host: "{{ inventory_hostname }}"
+      delegate_to: servera.lab.example.com
+
+  handlers:
+    - name: Varnish Cache is clean
+      service:
+        name: varnish
+        state: restarted
+EOF
+
+  cat <<EOF > /home/student/${problem_name}/run_curl_in_a_loop.sh
+#!/bin/bash
+
+while :
+do
+  curl --cacert ~/${problem_name}/cacert.pem https://servera.lab.example.com/
+  sleep 1
+done
+EOF
+  chmod a+x /home/student/${problem_name}/run_curl_in_a_loop.sh
+  print_SUCCESS
+
+  pad " · Creating an SSL certificate for servera"
+  rhel_certs_create servera.lab.example.com
+  if [ $? -eq 0 ]
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Copying the certificates to ~/${problem_name}"
+  cp /etc/pki/CA/certs/servera.lab.example.com.crt /etc/pki/CA/private/servera.lab.example.com.key /home/student/${problem_name}/files
+  cp /etc/pki/CA/cacert.pem /home/student/${problem_name}
+  chown -R student: /home/student/${problem_name}
+  print_SUCCESS
+
+  print_line
+}
+
+
+function lab_finish {
+
+  print_header "Cleaning up the lab on ${target_a}, ${target_c}, and ${target_d}:"
+  host_reachable ${target_a} ${target_c} ${target_d}
+
+  for target in ${target_c} ${target_d}
+  do
+    pad " · Stopping varnish, varnishncsa, and httpd on ${target}"
+    ${ssh} ${target} 'systemctl stop varnish varnishncsa httpd'
+    print_SUCCESS
+
+    pad " · Removing the varnish and httpd packages from ${target}"
+    ${ssh} ${target} 'yum remove -y varnish varnish-docs httpd'
+    print_SUCCESS
+
+    pad " · Cleaning up varnish and httpd configuration on ${target}"
+    ${ssh} ${target} 'rm -rf /var/log/varnish /var/lib/varnish /etc/varnish /etc/systemd/system/varnish.service.d /var/www/html/* /var/log/httpd /var/lib/httpd /etc/httpd/conf/*'
+    print_SUCCESS
+
+    pad " · Closing the firewall port 6081 on ${target}"
+    ${ssh} ${target} 'firewall-cmd --remove-port=6081/tcp --permanent ; firewall-cmd --remove-port=6081/tcp'
+    print_SUCCESS
+  done
+
+  pad " · Removing the haproxy package from ${target_a}"
+  ${ssh} ${target_a} 'yum remove -y haproxy'
+  print_SUCCESS
+
+  pad " · Resetting SELinux Boolean on ${target_a}"
+  ${ssh} ${target_a} 'setsebool -P haproxy_connect_any off'
+  print_SUCCESS
+
+  pad " · Cleaning up HAProxy configuration on ${target_a}"
+  ${ssh} ${target_a} 'rm -rf /var/lib/haproxy /etc/haproxy /etc/sysconfig/haproxy /etc/pki/haproxy /root/servera.lab.example.com.* /root/cacert.pem /root/haproxy.pem'
+  print_SUCCESS
+
+  pad " · Closing the firewall port on ${target_a}"
+  ${ssh} ${target_a} 'firewall-cmd --remove-service=http --remove-service=https --permanent ; firewall-cmd --remove-service=http --remove-service=https'
+  print_SUCCESS
+
+  pad " · Removing the varnish-docs package from workstation"
+  yum remove -y varnish varnish-docs
+  print_SUCCESS
+
+  pad " · Cleaning up the certificates on workstation"
+  rhel_certs_delete servera.lab.example.com
+  print_SUCCESS
+
+  print_line
+  print_line 'Lab finished.'
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

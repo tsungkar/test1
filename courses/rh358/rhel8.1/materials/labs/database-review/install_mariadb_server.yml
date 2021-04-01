@@ -1,0 +1,33 @@
+---
+- name: Install MariaDB server
+  hosts: db_servers
+  become: yes
+
+  tasks:
+    - name: Install mariadb-server package
+      yum:
+        name: FIXME
+        state: FIXME
+
+    - name: Enable and start mariadb
+      service:
+        name: FIXME
+        state: FIXME
+        enabled: FIXME
+
+    - name: Firewall permits mysql service
+      firewalld:
+        service: FIXME
+        permanent: FIXME
+        state: FIXME
+        immediate: FIXME
+
+- name: Install MariaDB client
+  hosts: db_clients
+  become: yes
+
+  tasks:
+    - name: Install MariaDB client package
+      yum:
+        name: FIXME
+        state: FIXME

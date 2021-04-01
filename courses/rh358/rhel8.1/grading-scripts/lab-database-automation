@@ -1,0 +1,126 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-database-automation - grading script for RH358 Automating MariaDB
+#                               Deployment guided exercise.
+#
+# SYNOPSIS
+#     lab-database-automation {start|finish}
+#
+#        start   - prepare the system for starting the lab
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start or finish
+#     for the Automating MariaDB Deployment guided exercise.
+#
+# CHANGELOG
+#   * Thu Jul 02 2020 George Hacker <ghacker@redhat.com>
+#   - Call rhel_config_ansible() to download student project files
+#   * Sat May 16 2020 Victor Costea <vcostea@redhat.com>
+#   - original code
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+targeta='servera'
+targetb='serverb'
+targetw='workstation'
+
+ge_playbook_dir="classroom/ansible"
+ge_playbook_tar="${problem_name}.tar"
+ge_install_playbook='playbook.yml'
+ge_remove_db='remove_mariadb.yml'
+ge_install_pkgs='install_packages.yml'
+
+ansible_proj_dir='/home/student/database-auto'
+
+declare -a valid_commands=(start finish)
+
+function lab_start {
+
+  print_header "Starting ${problem_name} exercise."
+
+  host_reachable ${targeta} ${targetb}
+
+  #
+  # Run pre-exercise playbooks
+  #
+  # Download playbook directory to /tmp
+  pad ' · Download exercise playbooks'
+  cmd1="curl -o /tmp/${ge_playbook_tar} http://materials.example.com/${ge_playbook_dir}/${ge_playbook_tar}"
+  if ${cmd1}
+  then
+    tar -xf /tmp/${ge_playbook_tar} -C /tmp
+    rm -rf /tmp/${ge_playbook_tar}
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  # Run playbook to ensure mariadb is not installed
+  pad ' · Ensure mariadb is not installed'
+  cmd1="ansible-playbook ${ge_remove_db}"
+  cmd2="ansible-playbook ${ge_install_pkgs}"
+  cd /tmp/${problem_name}
+  if ${cmd1} && ${cmd2} & spinner $! 2
+  then
+    cd
+    rm -rf /tmp/${problem_name}
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  # Download student project files
+  rhel_config_ansible ${ansible_proj_dir}
+
+  print_line
+}
+
+function lab_finish {
+
+  print_line
+  print_header "Cleaning up the lab on ${targeta} and ${targetb}:"
+  host_reachable ${targeta} ${targetb}
+
+  # Download playbook directory
+  pad ' · Download exercise playbooks'
+  cmd1="curl -o /tmp/${ge_playbook_tar} http://materials.example.com/${ge_playbook_dir}/${ge_playbook_tar}"
+  if ${cmd1}
+  then
+    tar -xf /tmp/${ge_playbook_tar} -C /tmp
+    rm -rf /tmp/${ge_playbook_tar}
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  # Run playbook to cleanup GE exercise
+  pad ' · Run exercise cleanup playbooks'
+  cmd1="ansible-playbook ${ge_remove_db}"
+  cd /tmp/${problem_name}
+  if ${cmd1} & spinner $! 2
+  then
+    cd
+    rm -rf /tmp/${problem_name}
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  print_line
+  print_line 'Lab finished.'
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

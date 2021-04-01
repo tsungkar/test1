@@ -1,0 +1,187 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-web-nginx - start/finish script for RH358
+#
+# SYNOPSIS
+#     lab-web-nginx {start|finish}
+#
+# DESCRIPTION
+#     This script performs the start/finish steps for the basic httpds setup
+#     RH358-Configuring HTTPS with Apache HTTPD
+#
+# CHANGELOG
+#   * Mon May 12 2020 Dallas Spohn <dspohn@redhat.com>
+#   - original code
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin
+
+# Initialize and set some variables
+run_as_root='true'
+target='servera'
+reqd_package1='nginx'
+cacert='cacert.*'
+servera='servera.lab.example.com*'
+wwwa='www-a.lab.example.com*'
+conf='*conf'
+config_file='www-a.lab.example.com.conf'
+
+declare -a valid_commands=(start finish)
+
+
+function lab_start {
+  # Make sure httpd is not installed
+  print_header "Setting up ${target} for lab exercise work:"
+  host_reachable ${target}
+
+
+  pad " · Creating certificates for servera.lab.example.com"
+  rhel_certs_create servera.lab.example.com \
+       www-a.lab.example.com
+  if [ $? -eq 0 ]
+   then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+ #
+
+  pad " · Copying the certificate in student's home"
+  cp /etc/pki/CA/example-ca.crt \
+     /home/student/cacert.crt
+  chown student: /home/student/cacert.crt
+
+  cp /etc/pki/CA/certs/www-a.lab.example.com.crt \
+     /etc/pki/CA/private/www-a.lab.example.com.key \
+     /home/student
+
+  cp /etc/pki/CA/certs/servera.lab.example.com.crt \
+     /etc/pki/CA/private/servera.lab.example.com.key \
+     /home/student
+  chown student: /home/student/{servera,www-a}.lab.example.com.{crt,key}
+  print_SUCCESS
+
+  pad " · Copying the CA certificates in student's home"
+  cp /etc/pki/CA/cacert.pem /home/student
+  chown student: /home/student/cacert.pem
+  print_SUCCESS
+
+  # Download config file
+   pad ' · Download the www-a.lab.example.com.conf file'
+   curl -o /home/student/${config_file} http://materials.example.com/labs/web/${config_file}
+   print_SUCCESS
+
+#  dns_cname_create()
+  pad " · Creating the www alias for ${target}"
+  rhel_dns_cname_create www-a.lab.example.com,servera.lab.example.com
+
+  if [ $? -eq 0 ]
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Ensuring ${reqd_package1} package is not present:"
+  if ${ssh} ${target} "rpm -q ${reqd_package1}"
+  then
+    if ${ssh} ${target} "yum remove -y ${reqd_package1} ${reqd_mod}"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    print_SUCCESS
+  fi
+
+  # Make sure http service is removed from firewall
+  pad " · Ensuring http and https services are removed from firewall:"
+  ${ssh} ${target} "firewall-cmd --permanent --remove-service=http --remove-service=https"
+  ${ssh} ${target} "firewall-cmd --reload"
+  print_SUCCESS
+
+  print_line
+}
+
+function lab_finish {
+
+  pad " · Removing the www CNAMES"
+  rhel_dns_cname_delete
+  if [ $? -eq 0 ]
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Removing the certificates for servera and www-a"
+  # Always succeed
+  rhel_certs_delete servera.lab.example.com \
+    www-a.lab.example.com
+  print_SUCCESS
+
+
+  # Make sure httpd is not installed
+  pad " · Ensuring ${reqd_package1} is removed:"
+  if ${ssh} ${target} "rpm -q ${reqd_package1}"
+  then
+    if ${ssh} ${target} "yum remove -y ${reqd_package1}"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    print_SUCCESS
+  fi
+
+  # Remove directories created with the exercise. /srv/nginx
+  pad " · Removing virtual server directories:"
+  ${ssh} ${target} "rm -rf /srv/nginx"
+  print_SUCCESS
+
+  # Remove directories created with the exercise.
+  pad " · Removing configuration files:"
+  ${ssh} ${target} "rm -rf /etc/nginx/conf.d/{www-a.lab.example.com,servera.lab.example.com}.conf"
+  print_SUCCESS
+
+  # Make sure http service is removed from firewall
+  pad " · Ensuring http service is removed from firewall:"
+  ${ssh} ${target} "firewall-cmd --permanent --remove-service=http --remove-service=https"
+  ${ssh} ${target} "firewall-cmd --reload"
+  print_SUCCESS
+
+  # Removing cert files from servera
+  pad " · Ensuring that the certificates for Nginx are cleaned up."
+  ${ssh} ${target} "rm -rf /etc/pki/tls/private/{servera,www-a}.lab.example.com.key"
+  ${ssh} ${target} "rm -rf /etc/pki/tls/certs/{servera,www-a}.lab.example.com.crt"
+  print_SUCCESS
+
+  # Remove the SELinux file context
+  pad " · Ensuring that the SELinux file context is removed."
+  ${ssh} ${target} "semanage fcontext -d -t httpd_sys_content_t '/srv/nginx(/.*)?'"
+  print_SUCCESS
+
+  # Resetting the module to for Nginx.
+  pad " · Resetting the AppStream Module for Nginx."
+  ${ssh} ${target} "yum module reset -y nginx"
+  print_SUCCESS
+
+  # Remove the certicficates in students home.
+  pad " · Ensure files are removed from student directory."
+  rm /home/student/${cacert} /home/student/${servera} /home/student/${wwwa} /home/student/${conf}
+  print_SUCCESS
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

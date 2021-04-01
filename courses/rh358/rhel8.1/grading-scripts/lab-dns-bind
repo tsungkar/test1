@@ -1,0 +1,115 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-dns-bind - grading script for RH358 Configuring Authoritative
+#                    Nameservers with BIND 9 guided exercise
+#
+# SYNOPSIS
+#     lab-dns-bind {start|finish}
+#
+#        start   - prepare the system for starting the exercise
+#        finish  - perform post-exercise cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start, or
+#     finish for the RH358 Configuring Authoritative Nameservers with
+#     BIND 9 guided exercise.
+#
+# CHANGELOG
+#   * Fri Jun 12 2020 George Hacker <ghacker@redhat.com>
+#   - Call rhel_erase_bind() library function
+#   * Tue Apr 21 2020 George Hacker <ghacker@redhat.com>
+#   - original code
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+
+declare -a valid_commands=(start finish)
+
+function lab_start {
+
+  print_header "Starting ${problem_name} exercise."
+
+  host_reachable bastion servera serverb serverc serverd
+
+  if ! servera_iface2=$(rhel_get_nicname servera 2); then
+    pad ' · Error: unable to get host 2nd interface name - servera'
+    print_FAIL
+    exit 1
+  fi
+  if ! serverb_iface2=$(rhel_get_nicname serverb 2); then
+    pad ' · Error: unable to get host 2nd interface name - serverb'
+    print_FAIL
+    exit 1
+  fi
+  if ! serverc_iface2=$(rhel_get_nicname serverc 2); then
+    pad ' · Error: unable to get host 2nd interface name - serverc'
+    print_FAIL
+    exit 1
+  fi
+  if ! serverd_iface2=$(rhel_get_nicname serverd 2); then
+    pad ' · Error: unable to get host 2nd interface name - serverd'
+    print_FAIL
+    exit 1
+  fi
+
+  rhel_bastion_bind
+  rhel_config_nic servera ${servera_iface2} '192.168.0.10/24' 'fde2:6494:1e09:2::a/64'
+  rhel_config_nic serverb ${serverb_iface2} '192.168.0.11/24' 'fde2:6494:1e09:2::b/64'
+  rhel_config_nic serverc ${serverc_iface2} '192.168.0.12/24' 'fde2:6494:1e09:2::c/64'
+  rhel_config_nic serverd ${serverd_iface2} '192.168.0.13/24' 'fde2:6494:1e09:2::d/64'
+  rhel_erase_bind serverb
+  rhel_erase_bind serverc
+
+  print_line
+}
+
+function lab_finish {
+
+  print_header "Finishing ${problem_name} exercise."
+
+  host_reachable bastion servera serverb serverc serverd
+
+  if ! servera_iface2=$(rhel_get_nicname servera 2); then
+    pad ' · Error: unable to get host 2nd interface name - servera'
+    print_FAIL
+    exit 1
+  fi
+  if ! serverb_iface2=$(rhel_get_nicname serverb 2); then
+    pad ' · Error: unable to get host 2nd interface name - serverb'
+    print_FAIL
+    exit 1
+  fi
+  if ! serverc_iface2=$(rhel_get_nicname serverc 2); then
+    pad ' · Error: unable to get host 2nd interface name - serverc'
+    print_FAIL
+    exit 1
+  fi
+  if ! serverd_iface2=$(rhel_get_nicname serverd 2); then
+    pad ' · Error: unable to get host 2nd interface name - serverd'
+    print_FAIL
+    exit 1
+  fi
+
+  rhel_bastion_unbind
+  rhel_unconfig_nic servera ${servera_iface2}
+  rhel_unconfig_nic serverb ${serverb_iface2}
+  rhel_unconfig_nic serverc ${serverc_iface2}
+  rhel_unconfig_nic serverd ${serverd_iface2}
+  rhel_erase_bind serverb
+  rhel_erase_bind serverc
+
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

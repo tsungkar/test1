@@ -1,0 +1,1035 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     filestorage-review - grading script for RH358 Providing File-Based
+#                           Network Storage lab
+#
+# SYNOPSIS
+#     filestorage-review {start|grade|finish}
+#
+#        start   - prepare the system for starting the lab
+#        grade   - perform evaluation steps on the system
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start, grading,
+#     or finish for the Providing File-Based Network Storage lab.
+#
+# CHANGELOG
+#   * Thu May 28 2020 Herve Quatremain <hquatrem@redhat.com>
+#   - original code
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+target_a='servera'
+target_d='serverd'
+
+# Samba
+smb_share_dir='/srv/developers'
+smb_mount_point='/devs_data'
+sambamount_user='sambamount'
+linux_users=(developer1:developers developer2:developers operator1:operators operator2:operators)
+linux_groups=(developers operators)
+
+# NFS
+nfs_share_dir='/srv/operators'
+nfs_mount_point='/operators_data'
+
+
+# This defines which subcommands are supported (start, grade, etc.).
+# Corresponding lab_COMMAND functions must be defined.
+declare -a valid_commands=(start grade finish)
+
+
+function lab_start {
+
+  print_header 'Starting lab.'
+
+  print_line "Preparing ${target_a} and ${target_d} for lab exercise work:"
+  print_line
+  host_reachable ${target_a} ${target_d}
+
+  pad " · Backing up /etc/fstab on ${target_a}"
+  if ${ssh} ${target_a} "test -s /var/tmp/lab-${problem_name}-fstab || cp /etc/fstab /var/tmp/lab-${problem_name}-fstab"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Backing up /etc/samba/smb.conf on ${target_d}"
+  if ${ssh} ${target_d} "test -s /var/tmp/lab-${problem_name}-smb.conf || cp /etc/samba/smb.conf /var/tmp/lab-${problem_name}-smb.conf"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  for target in ${target_a} ${target_d}
+  do
+    pad " · Creating the exercise groups on ${target}"
+    GROUP_ID=2020
+    for linux_group in ${linux_groups[*]}
+    do
+      ${ssh} ${target} "groupadd -g ${GROUP_ID} ${linux_group}"
+      let GROUP_ID=GROUP_ID+1
+    done
+    print_SUCCESS
+
+    pad " · Creating the exercise user accounts on ${target}"
+    USER_ID=2040
+    for user_group in ${linux_users[*]}
+    do
+      linux_user=${user_group%%:*}
+      linux_group=${user_group##*:}
+      ${ssh} ${target} "useradd -u ${USER_ID} -G ${linux_group} ${linux_user} ; echo redhat | passwd --stdin ${linux_user}"
+      let USER_ID=USER_ID+1
+    done
+    print_SUCCESS
+  done
+
+  pad " · Installing the Samba database command on ${target_d}"
+  if ${ssh} ${target_d} "yum install -y samba-common-tools"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Adding the exercise users to Samba database on ${target_d}"
+  for user_group in ${linux_users[*]}
+  do
+    linux_user=${user_group%%:*}
+    echo -e 'redhat\nredhat' | ${ssh} ${target_d} "smbpasswd -s -a ${linux_user}"
+  done
+  print_SUCCESS
+
+  #
+  # workstation
+  #
+
+  if [ -e "/home/student/${problem_name}" ]
+  then
+    pad " · Saving existing ~/${problem_name}"
+    if mv /home/student/${problem_name} /home/student/${problem_name}.$(date +%m-%d-%H:%M:%S)
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  rhel_install_ansible
+
+  pad " · Deploying the Ansible files on workstation"
+  mkdir -p /home/student/${problem_name}/{templates,.solution}
+
+  cat <<EOF > /home/student/${problem_name}/.solution/nfs_server.yml
+---
+- name: Share a directory with NFS
+  hosts: serverd.lab.example.com
+  become: true
+  vars:
+    shared_dir: ${nfs_share_dir}
+
+  tasks:
+    - name: the package for NFS server is installed
+      yum:
+        name: nfs-utils
+        state: present
+
+    - name: the directory exists
+      file:
+        path: "{{ shared_dir }}"
+        owner: root
+        group: operators
+        mode: '2770'
+        state: directory
+
+    - name: the directory is shared
+      copy:
+        content: "{{ shared_dir }} servera.lab.example.com(rw)\n"
+        dest: /etc/exports.d/share.exports
+        owner: root
+        group: root
+        mode: '0644'
+      notify: reload exports
+
+    - name: NFS is started and enabled
+      service:
+        name: nfs-server
+        state: started
+        enabled: yes
+
+    - name: the firewall is opened for NFS
+      firewalld:
+        service: nfs
+        state: enabled
+        immediate: yes
+        permanent: yes
+
+  handlers:
+    - name: reload exports
+      service:
+        name: nfs-server
+        state: reloaded
+EOF
+
+  cat <<EOF > /home/student/${problem_name}/nfs_server.yml
+---
+- name: Share a directory with NFS
+  hosts: serverd.lab.example.com
+  become: true
+  vars:
+    shared_dir: ${nfs_share_dir}
+
+  tasks:
+    - name: the package for NFS server is installed
+      #FIXME: install the required package for an NFS server
+
+    - name: the directory exists
+      #FIXME: create the {{ shared_dir }} directory as follows:
+      #             Directory ownership: root
+      #       Directory group ownership: operators
+      #                    Group access: read/write
+      #              Other users access: none
+      #       All contents created in the directory must automatically
+      #       belong to the operators group.
+
+    - name: the directory is shared
+      #FIXME: declare the {{ shared_dir }} directory as an NFS share.
+      #       Only servera.lab.example.com must be able to access the share.
+      #       servera has read/write access to the share.
+      #       The root user on servera must have no access to the share.
+      notify: reload exports
+
+    - name: NFS is started and enabled
+      #FIXME: the service must be started and enabled
+
+    - name: the firewall is opened for NFS
+      #FIXME: configure the firewall to allow NFS traffic
+
+  handlers:
+    - name: reload exports
+      #FIXME: reload the NFS service
+EOF
+
+  cat <<EOF > /home/student/${problem_name}/.solution/nfs_client.yml
+---
+- name: Access an NFS share
+  hosts: servera.lab.example.com
+  become: true
+  vars:
+    shared_dir: ${nfs_share_dir}
+    mount_point: ${nfs_mount_point}
+
+  tasks:
+    - name: the package for NFS client is installed
+      yum:
+        name: nfs-utils
+        state: present
+
+    - name: the NFS share is mounted and in /etc/fstab
+      mount:
+        path: "{{ mount_point }}"
+        src: serverd.lab.example.com:{{ shared_dir }}
+        state: mounted
+        fstype: nfs
+EOF
+
+  cat <<EOF > /home/student/${problem_name}/nfs_client.yml
+---
+- name: Access an NFS share
+  hosts: servera.lab.example.com
+  become: true
+  vars:
+    shared_dir: ${nfs_share_dir}
+    mount_point: ${nfs_mount_point}
+
+  tasks:
+    - name: the package for NFS client is installed
+      #FIXME: install the required package for an NFS client
+
+    - name: the NFS share is mounted and in /etc/fstab
+      #FIXME: persistently mount {{ shared_dir }} from serverd.lab.example.com
+      #       into the {{ mount_point }} directory
+EOF
+
+  cat <<EOF > /home/student/${problem_name}/smb_vars.yml
+---
+shared_dir: ${smb_share_dir}
+share_name: devdata
+mount_point: ${smb_mount_point}
+
+# User account for mounting the share
+samba_usermount: ${sambamount_user}
+samba_passmount: redhat
+
+allowed_group: developers
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/.solution/smb.conf.j2
+[global]
+        workgroup = MYWORKGROUP
+        server min protocol = SMB3
+        smb encrypt = required
+
+[{{ share_name }}]
+        path = {{ shared_dir }}
+        valid users = {{ samba_usermount }}, @{{ allowed_group }}
+        write list = @{{ allowed_group }}
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/templates/smb.conf.j2
+# See smb.conf.example for a more detailed config file or
+# read the smb.conf manpage.
+# Run 'testparm' to verify the config is correct after
+# you modified it.
+
+[global]
+        workgroup = SAMBA
+        security = user
+
+        passdb backend = tdbsam
+
+        printing = cups
+        printcap name = cups
+        load printers = yes
+        cups options = raw
+
+[homes]
+        comment = Home Directories
+        valid users = %S, %D%w%S
+        browseable = No
+        read only = No
+        inherit acls = Yes
+
+[printers]
+        comment = All Printers
+        path = /var/tmp
+        printable = Yes
+        create mask = 0600
+        browseable = No
+
+[print$]
+        comment = Printer Drivers
+        path = /var/lib/samba/drivers
+        write list = @printadmin root
+        force group = @printadmin
+        create mask = 0664
+        directory mask = 0775
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/.solution/smb_server.yml
+---
+- name: Share a directory with SMB
+  hosts: serverd.lab.example.com
+  become: true
+  vars_files:
+    - smb_vars.yml
+
+  tasks:
+    - name: the package for a Samba server is installed
+      yum:
+        name: samba
+        state: present
+
+    - name: the Linux user for Samba mount exists
+      user:
+        name: "{{ samba_usermount }}"
+        shell: /sbin/nologin
+        create_home: no
+        system: yes
+
+    - name: the Samba user for Samba mount exists
+      command: smbpasswd -s -a {{ samba_usermount }}
+      args:
+        stdin: "{{ samba_passmount }}\n{{ samba_passmount }}"
+
+    - name: the directory exists
+      file:
+        path: "{{ shared_dir }}"
+        owner: "{{ samba_usermount }}"
+        group: "{{ allowed_group }}"
+        mode: '2570'
+        state: directory
+        setype: samba_share_t
+
+    - name: the directory is shared
+      template:
+        src: templates/smb.conf.j2
+        dest: /etc/samba/smb.conf
+        owner: root
+        group: root
+        mode: '0644'
+        setype: samba_etc_t
+      notify: reload smb
+
+    - name: the SMB service is started and enabled
+      service:
+        name: smb
+        state: started
+        enabled: yes
+
+    - name: the firewall is opened for SMB
+      firewalld:
+        service: samba
+        state: enabled
+        immediate: yes
+        permanent: yes
+
+  handlers:
+    - name: reload smb
+      service:
+        name: smb
+        state: reloaded
+EOF
+
+  cat <<EOF > /home/student/${problem_name}/smb_server.yml
+---
+- name: Share a directory with SMB
+  hosts: serverd.lab.example.com
+  become: true
+  vars_files:
+    - smb_vars.yml
+
+  tasks:
+    - name: the package for a Samba server is installed
+      #FIXME: install the required package for a Samba server
+
+    - name: the Linux user for Samba mount exists
+      #FIXME: create the ${sambamount_user} system user account as follows:
+      #       - Prevent login
+      #       - No home directory
+
+    - name: the Samba user for Samba mount exists
+      #FIXME: add the ${sambamount_user} user to the Samba database.
+      #       Use redhat for the password.
+
+    - name: the directory exists
+      #FIXME: create the ${smb_share_dir} directory as follows:
+      #             Directory ownership: ${sambamount_user}
+      #       Directory group ownership: developers
+      #                    Owner access: read
+      #                    Group access: read/write
+      #              Other users access: none
+      #       All contents created in the directory must automatically
+      #       belong to the developers group.
+      #       Set the correct SELinux context type.
+
+    - name: the directory is shared
+      #FIXME: declare the ${smb_share_dir} directory as an SMB share
+      #       in the Samba configuration file as follows:
+      #                          Work group: MYWORKGROUP
+      #        SMB minimum protocol version: 3
+      #                  Traffic encryption: Always required
+      #                          Share name: devdata
+      #                   Access allowed to: ${sambamount_user} and the
+      #                                      members of the developers group
+      #                   Read/write access: Members of the developers group
+      #       For your convenience, the default Samba configuration file is
+      #       available under the templates/ directory.
+      notify: reload smb
+
+    - name: the SMB service is started and enabled
+      #FIXME: the service must be started and enabled
+
+    - name: the firewall is opened for SMB
+      #FIXME: configure the firewall to allow SMB traffic
+
+  handlers:
+    - name: reload smb
+      #FIXME: reload the SMB service
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/.solution/smb_client.yml
+---
+- name: Access an SMB share
+  hosts: servera.lab.example.com
+  become: true
+  vars_files:
+   - smb_vars.yml
+
+  tasks:
+    - name: the package to mount SMB shares is installed
+      yum:
+        name: cifs-utils
+        state: present
+
+    - name: the credential file exists
+      copy:
+        content: "username={{ samba_usermount }}\n\
+                  password={{ samba_passmount }}\n"
+        dest: /etc/samba/creds.txt
+        owner: root
+        group: root
+        mode: '0600'
+      no_log: true
+
+    - name: the SMB share is mounted
+      mount:
+        path: "{{ mount_point }}"
+        src: "//serverd.lab.example.com/{{ share_name }}"
+        opts: "credentials=/etc/samba/creds.txt,multiuser,seal"
+        state: mounted
+        fstype: cifs
+EOF
+
+  cat <<EOF > /home/student/${problem_name}/smb_client.yml
+---
+- name: Access an SMB share
+  hosts: servera.lab.example.com
+  become: true
+  vars_files:
+   - smb_vars.yml
+
+  tasks:
+    - name: the package to mount SMB shares is installed
+      #FIXME: install the required package to mount SMB shares
+
+    - name: the credential file exists
+      #FIXME: create the /etc/samba/creds.txt credential file for the
+      #       multiuser mount option.
+      #       Use the ${sambamount_user} user account with redhat for
+      #       the password.
+
+    - name: the SMB share is mounted
+      #FIXME: persistently mount the devdata SMB share from
+      #       serverd.lab.example.com into the ${smb_mount_point}
+      #       directory.
+      #       Use the credential file, the multiuser option, and activate
+      #       traffic encryption.
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/ansible.cfg
+[defaults]
+inventory=inventory
+remote_user=devops
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/inventory
+[servers]
+serverd.lab.example.com
+
+[clients]
+servera.lab.example.com
+serverb.lab.example.com
+serverc.lab.example.com
+EOF
+  print_SUCCESS
+  chown -R student: /home/student/${problem_name}
+
+  print_line
+}
+
+
+function lab_grade {
+
+  print_header "Grading the student's work on ${target_a} and ${target_d}:"
+  host_reachable ${target_a} ${target_d}
+
+  if ! ${ssh} ${target_d} "rpm -q nfs-utils"
+  then
+    pad " · The package for NFS server is installed on ${target_d}"
+    print_FAIL
+  fi
+
+  pad " · The NFS service is running on ${target_d}"
+  if ${ssh} ${target_d} "systemctl is-active nfs-server"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The NFS service is enabled on ${target_d}"
+  if ${ssh} ${target_d} "systemctl is-enabled nfs-server"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Firewall port for NFS is opened on ${target_d}"
+  ${ssh} ${target_d} "firewall-cmd --list-all" | grep -wq -e 2049 -e nfs
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${nfs_share_dir} exists on ${target_d}"
+  TMP_FILE=$(mktemp)
+  ${ssh} ${target_d} "stat --format 'd=%F g=%G a=%A' ${nfs_share_dir}" > "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${nfs_share_dir} is a directory"
+  if grep -wq d=directory "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${nfs_share_dir} group is operators"
+  if grep -wq g=operators "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${nfs_share_dir} group has read/write access"
+  if grep -q " a=....rw" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${nfs_share_dir} other users have no access"
+  if grep -q " a=.......---" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${nfs_share_dir} contents automatically belong to the group"
+  if grep -iq " a=......s" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${nfs_share_dir} is shared with NFS on ${target_d}"
+  ${ssh} ${target_d} "exportfs -r ; exportfs -v | grep ${nfs_share_dir}" > "${TMP_FILE}"
+  if grep -wq "^${nfs_share_dir}" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${target_a} can access the NFS share on ${target_d}"
+  if grep -wiq "${target_a}" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${target_a} has read/write access to the NFS share on ${target_d}"
+  if grep -w rw "${TMP_FILE}" | grep -wiq "${target_a}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · root on ${target_a} has no access to the NFS share on ${target_d}"
+  if grep -w root_squash "${TMP_FILE}"  | grep -wiq "${target_a}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  if ! ${ssh} ${target_a} "rpm -q nfs-utils"
+  then
+    pad " · The package for NFS client is installed on ${target_a}"
+    print_FAIL
+  fi
+
+  pad " · The ${nfs_mount_point} directory exists on ${target_a}"
+  if ${ssh} ${target_a} "test -d ${nfs_mount_point}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The NFS share is mounted under ${nfs_mount_point}"
+  ${ssh} ${target_a} mount | grep -Eqi "(${target_d}|172.25.250.13).* ${nfs_mount_point} .*nfs"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The NFS share is declared in /etc/fstab on ${target_a}"
+  ${ssh} ${target_a} cat /etc/fstab | grep -Eqi "(${target_d}|172.25.250.13).*${nfs_mount_point}.*nfs"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The package for Samba server is installed on ${target_d}"
+  if ${ssh} ${target_d} "rpm -q samba"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The SMB service is running on ${target_d}"
+  if ${ssh} ${target_d} "systemctl is-active smb"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The SMB service is enabled on ${target_d}"
+  if ${ssh} ${target_d} "systemctl is-enabled smb"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Firewall ports for SMB are opened on ${target_d}"
+  ${ssh} ${target_d} "firewall-cmd --list-all" | grep -wq -e 445 -e samba
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The ${sambamount_user} user account exists on ${target_d}"
+  ${ssh} ${target_d} "grep -w ${sambamount_user} /etc/passwd" > "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${sambamount_user} cannot login on ${target_d}"
+  if grep -qw -e nologin -e false -e true "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${sambamount_user} is defined in Samba database on ${target_d}"
+  if ${ssh} ${target_d} "yum -y install samba-common-tools ; pdbedit -L | grep -wq ${sambamount_user}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${smb_share_dir} exists on ${target_d}"
+  ${ssh} ${target_d} "stat --format 'd=%F g=%G a=%A s=%C u=%U' ${smb_share_dir}" > "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${smb_share_dir} is a directory"
+  if grep -wq d=directory "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${smb_share_dir} owner is ${sambamount_user}"
+  if grep -wq u=${sambamount_user} "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${smb_share_dir} group is developers"
+  if grep -wq g=developers "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${smb_share_dir} group has read/write access"
+  if grep -q " a=....rw" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${smb_share_dir} other users have no access"
+  if grep -q " a=.......---" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${smb_share_dir} contents automatically belong to the group"
+  if grep -iq " a=......s" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The SMB work group is MYWORKGROUP on ${target_d}"
+  ${ssh} ${target_d} cat /etc/samba/smb.conf > "${TMP_FILE}"
+  if grep -qEi "workgroup\s*=\s*MYWORKGROUP\s*$" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The SMB min protocol version is 3 on ${target_d}"
+  if grep -qEi "server\s+min\s+protocol\s*=\s*SMB3" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · SMB traffic encryption is required on ${target_d}"
+  if grep -qEi "smb\s+encrypt\s*=\s*(required|mandatory)" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The devdata SMB share is declared on ${target_d}"
+  if grep -qEi "\[\s*devdata\s*\]" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · devdata shares the ${smb_share_dir} directory"
+  if grep -qEi "path\s*=\s*${smb_share_dir}" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The package to mount SMB shares is installed on ${target_a}"
+  if ${ssh} ${target_a} "rpm -q cifs-utils"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The /etc/samba/creds.txt credential file exists on ${target_a}"
+  ${ssh} ${target_a} cat /etc/samba/creds.txt > "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The ${sambamount_user} user is used for SMB credentials"
+  if grep -qEi "username\s*=\s*${sambamount_user}" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The password is redhat in the credential file on ${target_a}"
+  if grep -qEi "password\s*=\s*redhat" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The ${smb_mount_point} directory exists on ${target_a}"
+  if ${ssh} ${target_a} "test -d ${smb_mount_point}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The SMB share is mounted under ${smb_mount_point}"
+  ${ssh} ${target_a} mount | grep -Ei "(${target_d}|172.25.250.13).* ${smb_mount_point} .*cifs" > "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The SMB share is mounted with the multiuser option"
+  if grep -qw multiuser "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The SMB share is mounted with traffic encryption"
+  if grep -qw seal "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The SMB share is declared in /etc/fstab on ${target_a}"
+  ${ssh} ${target_a} cat /etc/fstab | grep -Ei "(${target_d}|172.25.250.13).*${smb_mount_point}.*cifs" > "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The share is using the /etc/samba/creds.txt credential file"
+  if grep -q "credentials=/etc/samba/creds.txt" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  rm -f "${TMP_FILE}"
+
+  # Overall grade
+  print_line
+  pad 'Overall lab grade'
+  if [[ ${fail_count} -eq 0 ]]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+
+function lab_finish {
+
+  print_header "Cleaning up the lab on ${target_a} and ${target_d}:"
+  host_reachable ${target_a} ${target_d}
+
+  pad " · Unmounting the shares on ${target_a}"
+  ${ssh} ${target_a} "umount -afl -t cifs ; umount -afl -t nfs ; umount -afl -t nfs4 ; sleep 5"
+  print_SUCCESS
+
+  pad " · Removing the mount points from ${target_a}"
+  ${ssh} ${target_a} "rm -rf ${smb_mount_point} ${nfs_mount_point}" &
+  print_SUCCESS
+
+  pad " · Restoring /etc/fstab on ${target_a}"
+  ${ssh} ${target_a} "test -s /var/tmp/lab-${problem_name}-fstab && cp /var/tmp/lab-${problem_name}-fstab /etc/fstab ; rm -f /var/tmp/lab-${problem_name}-fstab"
+  print_SUCCESS
+
+  pad " · Removing the credential file from ${target_a}"
+  ${ssh} ${target_a} "rm -f /etc/samba/cred*"
+  print_SUCCESS
+
+  pad " · Removing the packages from ${target_a}"
+  ${ssh} ${target_a} "yum remove -y cifs-utils samba-client"
+  print_SUCCESS
+
+  pad " · Closing the firewall ports on ${target_a}"
+  ${ssh} ${target_a} 'firewall-cmd --remove-service=samba-client --remove-service=samba-dc --remove-service=samba --permanent ; firewall-cmd --remove-port=137/udp --remove-port=138/udp --remove-port=139/tcp --remove-port=445/tcp --permanent ; firewall-cmd --reload'
+  print_SUCCESS
+
+  pad " · Removing the exercise user accounts from ${target_a}"
+  for user_group in ${linux_users[*]} ${sambamount_user}
+  do
+    linux_user=${user_group%%:*}
+    ${ssh} ${target_a} "userdel --force --remove ${linux_user}"
+  done
+  print_SUCCESS
+
+  pad " · Removing the exercise groups from ${target_a}"
+  for linux_group in ${linux_groups[*]}
+  do
+    ${ssh} ${target_a} "groupdel ${linux_group}"
+  done
+  print_SUCCESS
+
+  pad " · Stopping the services on ${target_d}"
+  ${ssh} ${target_d} "systemctl disable --now smb.service nmb.service nfs-server.service"
+  print_SUCCESS
+
+  pad " · Removing the packages from ${target_d}"
+  ${ssh} ${target_d} "yum remove -y samba samba-libs samba-client samba-common-tools"
+  print_SUCCESS
+
+  pad " · Removing the samba password file from ${target_d}"
+  ${ssh} ${target_d} "rm -rf /var/lib/samba/private/*"
+  print_SUCCESS
+
+  pad " · Restoring /etc/samba/smb.conf on ${target_d}"
+  ${ssh} ${target_d} "test -s /var/tmp/lab-${problem_name}-smb.conf && cp /var/tmp/lab-${problem_name}-smb.conf /etc/samba/smb.conf ; rm -f /var/tmp/lab-${problem_name}-smb.conf"
+  print_SUCCESS
+
+  pad " · Cleaning up NFS exports on ${target_d}"
+  ${ssh} ${target_d} "rm -f /etc/exports.d/* ; > /etc/exports"
+  print_SUCCESS
+
+  pad " · Removing the shared directories from ${target_d}"
+  ${ssh} ${target_d} "rm -rf ${smb_share_dir} ${nfs_share_dir}"
+  print_SUCCESS
+
+  pad " · Removing the exercise user accounts from ${target_d}"
+  for user_group in ${linux_users[*]} ${sambamount_user}
+  do
+    linux_user=${user_group%%:*}
+    ${ssh} ${target_d} "userdel --force --remove ${linux_user}"
+  done
+  print_SUCCESS
+
+  pad " · Removing the exercise groups from ${target_d}"
+  for linux_group in ${linux_groups[*]}
+  do
+    ${ssh} ${target_d} "groupdel ${linux_group}"
+  done
+  print_SUCCESS
+
+  pad " · Closing the firewall ports on ${target_d}"
+  ${ssh} ${target_d} 'firewall-cmd --remove-service=samba-client --remove-service=samba-dc --remove-service=samba --permanent ; firewall-cmd --remove-port=137/udp --remove-port=138/udp --remove-port=139/tcp --remove-port=445/tcp --permanent ; firewall-cmd --remove-service=nfs --remove-service=nfs3 --permanent ; firewall-cmd --remove-port=2049/tcp --remove-port=2049/udp --permanent ; firewall-cmd --reload'
+  print_SUCCESS
+
+  print_line
+  print_line 'Lab finished.'
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

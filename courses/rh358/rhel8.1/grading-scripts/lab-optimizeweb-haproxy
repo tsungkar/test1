@@ -1,0 +1,159 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-optimizeweb-haproxy - grading script for RH358 Terminating HTTPS
+#                               Traffic and Load Balancing with HAProxy
+#                               guided exercise.
+#
+# SYNOPSIS
+#     lab-optimizeweb-haproxy {start|finish}
+#
+#        start   - prepare the system for starting the lab
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start or finish
+#     for the Terminating HTTPS Traffic and Load Balancing with HAProxy
+#     guided exercise.
+#
+# CHANGELOG
+#   * Mon Apr 20 2020 Herve Quatremain <hquatrem@redhat.com>
+#   - original code
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+target_a='servera'
+target_c='serverc'
+target_d='serverd'
+
+
+# This defines which subcommands are supported (start, grade, etc.).
+# Corresponding lab_COMMAND functions must be defined.
+declare -a valid_commands=(start finish)
+
+
+function lab_start {
+
+  print_header 'Starting lab.'
+
+  print_line "Preparing ${target_c} and ${target_d} for lab exercise work:"
+  print_line
+  host_reachable ${target_c} ${target_d}
+
+  for target in "${target_c}" "${target_d}"
+  do
+    pad " · Installing the httpd package on ${target}"
+    if ${ssh} ${target} 'yum install -y httpd'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    pad " · Deploying a web content on ${target}"
+    ${ssh} ${target} "echo 'This is ${target}' > /var/www/html/index.html"
+    print_SUCCESS
+
+    pad " · Configuring firewall ports on ${target}"
+    ${ssh} ${target} "firewall-cmd --add-service=http ; firewall-cmd --add-service=http --permanent"
+    print_SUCCESS
+
+    pad " · Starting and enabling httpd on ${target}"
+    if ${ssh} ${target} "systemctl enable --now httpd.service"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  done
+
+  pad " · Creating an SSL certificate for ${target_a}"
+  rhel_certs_create servera.lab.example.com
+  if [ $? -eq 0 ]
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Copying the certificate to ${target_a}"
+  if ${ssh} ${target_a} "mkdir -p /root/${problem_name}"
+  then
+    cat /etc/pki/CA/certs/servera.lab.example.com.crt | ${ssh} ${target_a} "cat > /root/${problem_name}/servera.lab.example.com.crt"
+    cat /etc/pki/CA/private/servera.lab.example.com.key | ${ssh} ${target_a} "cat > /root/${problem_name}/servera.lab.example.com.key"
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Copying the CA certificates in student's home"
+  cp /etc/pki/CA/cacert.pem /home/student
+  chown student: /home/student/cacert.pem
+  print_SUCCESS
+
+  pad " · Closing the firewall port on ${target_a}"
+  ${ssh} ${target_a} 'firewall-cmd --remove-service=http --remove-service=https --permanent ; firewall-cmd --remove-service=http --remove-service=https ; firewall-cmd --remove-port=80/tcp --remove-port=443/tcp --permanent ; firewall-cmd --remove-port=80/tcp --remove-port=443/tcp'
+  print_SUCCESS
+
+  print_line
+}
+
+
+function lab_finish {
+
+  print_header "Cleaning up the lab on ${target_a}, ${target_c}, and ${target_d}:"
+  host_reachable ${target_a} ${target_c} ${target_d}
+
+  pad " · Cleaning up the certificates on workstation"
+  rm -f /home/student/cacert.pem
+  rhel_certs_delete servera.lab.example.com
+  print_SUCCESS
+
+  pad " · Cleaning up the certificate on ${target_a}"
+  ${ssh} ${target_a} "rm -rf /root/${problem_name}"
+  print_SUCCESS
+
+  pad " · Removing the haproxy package from ${target_a}"
+  ${ssh} ${target_a} 'yum remove -y haproxy'
+  print_SUCCESS
+
+  pad " · Cleaning up haproxy configuration on ${target_a}"
+  ${ssh} ${target_a} 'rm -rf /var/lib/haproxy /etc/haproxy /etc/sysconfig/haproxy /etc/pki/haproxy /root/servera.lab.example.com.* /root/cacert.pem /root/haproxy.pem'
+  print_SUCCESS
+
+  pad " · Closing the firewall port on ${target_a}"
+  ${ssh} ${target_a} 'firewall-cmd --remove-service=http --remove-service=https --permanent ; firewall-cmd --remove-service=http --remove-service=https ; firewall-cmd --remove-port=80/tcp --remove-port=443/tcp --permanent ; firewall-cmd --remove-port=80/tcp --remove-port=443/tcp'
+  print_SUCCESS
+
+  for target in "${target_c}" "${target_d}"
+  do
+    pad " · Removing the httpd package from ${target}"
+    ${ssh} ${target} 'yum remove -y httpd'
+    print_SUCCESS
+
+    pad " · Removing web content from ${target}"
+    ${ssh} ${target} "rm -rf /var/www/html/* /var/log/httpd /var/lib/httpd"
+    print_SUCCESS
+
+    pad " · Closing the firewall port on ${target}"
+    ${ssh} ${target} 'firewall-cmd --remove-service=http --permanent ; firewall-cmd --remove-service=http'
+    print_SUCCESS
+  done
+
+  print_line
+  print_line 'Lab finished.'
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

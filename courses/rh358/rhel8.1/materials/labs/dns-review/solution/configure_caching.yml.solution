@@ -1,0 +1,47 @@
+---
+- name: Install cache only nameserver
+  hosts: caching_dns
+  remote_user: devops
+  become: true
+
+  vars:
+    interface_automatic: "yes"
+    access_control: "172.25.250.0/24 allow"
+    domain_insecure: example.com
+    forward_zone_name: .
+    forward_zone_addr: "172.25.250.254"
+
+  tasks:
+    - name: Install cache only nameserver
+      yum:
+        name: unbound
+        state: present
+      notify:
+        - restart_unbound
+
+    - name: Create configuration file on caching server host
+      template:
+        src: unbound.conf.j2
+        dest: /etc/unbound/conf.d/unbound.conf
+      notify:
+        - restart_unbound
+
+    - name: Add dns service to firewall
+      firewalld:
+        service: dns
+        state: enabled
+        immediate: yes
+        permanent: yes
+
+    - name: Make sure unbound is running and enabled
+      service:
+        name: unbound
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: restart_unbound
+      service:
+        name: unbound
+        state: restarted
+        enabled: true

@@ -1,0 +1,77 @@
+#!/bin/bash
+#
+# Copyright 2019 Red Hat, Inc.
+#
+# NAME
+#     lab-test - lab script to demo and test new platform shlib functions
+#
+# SYNOPSIS
+#     lab-test {pad2|cnfh}
+#
+#        pad2 - test the pad2 function
+#        cnfh - test the command not found handler
+#
+# DESCRIPTION
+#     This script, based on singular argument, tests a function
+#
+# CHANGELOG
+#   * Fri Aug 23 2019 Fernando Lozano <flozano@redhat.com>
+#   - original code
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin
+
+# Initialize and set some variables
+run_as_root='true'
+
+# This defines which subcommands are supported (start, grade, etc.).
+# Corresponding lab_COMMAND functions must be defined.
+declare -a valid_commands=(pad2 cnfh)
+
+
+function lab_pad2 {
+
+  print_line
+  print_line 'Regular pad function can break alignment:'
+  pad ' · first message is short'
+  print_PASS
+  pad ' · second message is very very very very log too much long to fit the space filled with dots'
+  print_FAIL
+  pad ' · third message is short'
+  print_PASS
+  pad 'fourth message oops forgot the bullet'
+  print_FAIL
+
+  print_line
+  print_line 'New pad2 function maintains alignment and also adds the bullet for you:'
+  pad2 'first message is short'
+  print_PASS
+  pad2 'second message is very very very very long too much long to fit the space filled with dots'
+  print_PASS
+  pad2 'third message is short'
+  print_PASS
+  pad2 'fourth message do not need to know how to type the bullet'
+  print_PASS
+
+  print_line
+}
+
+
+function lab_cnfh {
+
+  print_line
+  print_line 'Now the platform shlib fails if you make a typo in names of functions and command'
+  pad2 'Should call print_SUCCESS, not print_SUCESS'
+  print_SUCESS
+
+  print_line
+}
+
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+#source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

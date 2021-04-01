@@ -1,0 +1,143 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-dns-automation - grading script for RH358 Automating
+#                          Nameserver Configuration
+#
+# SYNOPSIS
+#     lab-dns-automation {start|finish}
+#
+#        start   - prepare the system for starting the lab
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start, or
+#     finish for the Automating Nameserver Configuration guided exercise.
+#
+# CHANGELOG
+#   * Thu Jul 02 2020 George Hacker <ghacker@redhat.com>
+#   - Call rhel_config_ansible() to download student project files
+#   * Fri Jun 12 2020 George Hacker <ghacker@redhat.com>
+#   - Call rhel_erase_bind() and rhel_erase_unbound() library functions
+#   * Sun Apr 26 2020 Victor Costea <vcostea@redhat.com>
+#   - Add remove named config files to erase_bind function
+#   * Sat Apr 25 2020 Victor Costea <vcostea@redhat.com>
+#   - Change network address for backend domain
+#   - Use shorter name (dns-auto) for project folder
+#   * Thu Apr 09 2020 Victor Costea <vcostea@redhat.com>
+#   - original code
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+
+targetw='workstation'
+targeta='servera'
+targetb='serverb'
+targetc='serverc'
+targetd='serverd'
+targeta_ip='192.168.0.10/24'
+targetb_ip='192.168.0.11/24'
+targetc_ip='192.168.0.12/24'
+targetd_ip='192.168.0.13/24'
+
+con_name='ge_conn'
+
+ansible_proj_dir='/home/student/dns-auto'
+
+declare -a valid_commands=(start finish)
+
+function lab_start {
+
+  print_header "Starting ${problem_name} exercise."
+
+  host_reachable bastion ${targeta} ${targetb} ${targetc}
+
+  # Reconfigure bastion with BIND9
+  rhel_bastion_bind
+
+  # Download student project files
+  rhel_config_ansible ${ansible_proj_dir}
+
+  # Configure a second network connection on server[a-d] with static IPs
+  for target_ip in ${targeta},${targeta_ip} ${targetb},${targetb_ip} ${targetc},${targetc_ip} ${targetd},${targetd_ip}
+  do
+    target=${target_ip%%,*}
+    ip_addr=${target_ip##*,}
+
+    if ! host_iface=$(rhel_get_nicname ${target} 2); then
+      pad " · Error: unable to get host 2nd interface name - ${target}"
+      print_FAIL
+      exit 1
+    fi
+
+    if ! ${ssh} ${target} "nmcli con show '${con_name}'"; then
+      pad " · Configuring ${host_iface} network interface on ${target}"
+      cmd1="nmcli con add con-name '${con_name}' type ethernet ifname ${host_iface}"
+      cmd2="nmcli con mod '${con_name}' ipv4.addresses '${ip_addr}'"
+      cmd3="nmcli con mod '${con_name}' ipv4.method manual"
+      cmd4="nmcli con up '${con_name}'"
+      if ${ssh} ${target} "${cmd1} && ${cmd2} && ${cmd3} && ${cmd4}"; then
+        print_SUCCESS
+      else
+        print_FAIL
+      fi
+    fi
+  done
+
+  # Remove Unbound from servera, BIND from server[bc[
+  rhel_erase_unbound ${targeta}
+  rhel_erase_bind ${targetb}
+  rhel_erase_bind ${targetc}
+
+  print_line
+}
+
+function lab_finish {
+
+  print_header "Finishing ${problem_name} exercise."
+
+  host_reachable ${targeta} ${targetb} ${targetc}
+
+  for target_ip in ${targeta},${targeta_ip} ${targetb},${targetb_ip} ${targetc},${targetc_ip} ${targetd},${targetd_ip}
+  do
+    target=${target_ip%%,*}
+    ip_addr=${target_ip##*,}
+
+    if ! host_iface=$(rhel_get_nicname ${target} 2); then
+      pad " · Error: unable to get host 2nd interface name - ${target}"
+      print_FAIL
+      exit 1
+    fi
+
+    if ${ssh} ${target} "nmcli con show '${con_name}'"; then
+      pad " · Unconfiguring ${host_iface} network interface on ${target}"
+      if ${ssh} ${target} "nmcli con del '${con_name}'"; then
+        print_SUCCESS
+      else
+        print_FAIL
+      fi
+    fi
+  done
+
+  # Unconfigure BIND and restore dnsmasq on bastion
+  rhel_bastion_unbind
+
+  # Remove Unbound from servera, BIND from server[bc[
+  rhel_erase_unbound ${targeta}
+  rhel_erase_bind ${targetb}
+  rhel_erase_bind ${targetc}
+
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

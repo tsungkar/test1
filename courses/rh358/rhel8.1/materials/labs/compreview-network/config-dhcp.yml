@@ -1,0 +1,56 @@
+---
+
+- name: Deploy a DHCPv4 and DHCPv6 server
+  hosts:
+# become: true
+
+  roles:
+    -
+
+  tasks:
+    - name: install the dhcp-server package
+      yum:
+        name:
+        state:
+
+    - name: deploy the DHCPv4 configuration file
+      copy:
+        src:
+        dest:
+      notify: reload dhcpd
+
+    - name: deploy the DHCPv6 configuration file
+      copy:
+        src:
+        dest:
+      notify: reload dhcpd6
+
+    - name: start and enable the dhcpd and dhcpd6 services
+      service:
+        name: "{{ item }}"
+        state:
+        enabled:
+      loop:
+        -
+        -
+
+    - name: open the dhcp and dhcpv6 firewall services
+      firewalld:
+        service: "{{ item }}"
+        state:
+        immediate:
+        permanent:
+      loop:
+        -
+        -
+
+  handlers:
+    - name: reload dhcpd
+      service:
+        name:
+        state: restarted
+
+    - name: reload dhcpd6
+      service:
+        name:
+        state: restarted

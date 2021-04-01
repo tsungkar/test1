@@ -1,0 +1,48 @@
+---
+- name: Install CUPS and create a print queue
+  hosts:
+  gather_facts: no
+  vars:
+    print_packages:
+    -
+    -
+    print_services:
+    -
+    -
+    print_ports:
+    -
+    queue_name: "local_print_queue_name"
+    device_uri: "URI_to_remote_print_queue"
+  tasks:
+    - name: Install the CUPS and Avahi packages
+      yum:
+        name: "{{ print_packages }}"
+        state:
+    - name: Enable and start the CUPS and Avahi services
+      systemd:
+        name: "{{ item }}"
+        state:
+        enabled:
+      loop: "{{ print_services }}"
+    - name: Open the mDNS firewall port
+      firewalld:
+        service: "{{ item }}"
+        state:
+        permanent:
+        immediate:
+      loop: "{{ print_ports }}"
+    - name: Check if print queue already exists
+      command:
+      register: cmdout
+      ignore_errors: true
+      changed_when: false
+    - name: Create the print queue
+      command:
+      when: cmdout.rc != 0
+    - name: Check default printer
+      command:
+      register: curr_dest
+      changed_when: false
+    - name: Make the new print queue the default
+      command:
+      when: curr_dest['stdout'] | regex_replace('^(.*):.') != queue_name

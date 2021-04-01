@@ -1,0 +1,553 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-web-review - start/finish script for RH358
+#
+# SYNOPSIS
+#     lab-web-review {start|finish}
+#
+# DESCRIPTION
+#     This script performs the start/grade/finish steps for the review section of chapter 8.
+#     httpd and nginx on serverc.
+# CHANGELOG
+#   * Mon Jun 2 2020 Dallas Spohn <dspohn@redhat.com>
+#   - original code
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin
+
+# Initialize and set some variables
+run_as_root='true'
+target_a='serverc'
+
+declare -a valid_commands=(start grade finish)
+
+# This defines which subcommands are supported (start, grade, etc.).
+# Corresponding lab_COMMAND functions must be defined.
+
+function lab_start {
+  # Make sure httpd is not installed
+  print_header "Preparing  ${target_a} for lab exercise work:"
+  host_reachable ${target_a}
+
+  rhel_install_ansible
+
+  pad " · Deploying the Ansible files on workstation"
+  mkdir -p /home/student/${problem_name}/{solutions,files,templates,group_vars}
+  mkdir -p /home/student/${problem_name}/group_vars/webserver
+
+
+# Create ansible.cfg
+  cat <<EOF > /home/student/${problem_name}/ansible.cfg
+[defaults]
+inventory=inventory
+remote_user=devops
+EOF
+
+# Create inventory
+  cat <<EOF > /home/student/${problem_name}/inventory
+[webserver]
+serverc.lab.example.com
+EOF
+
+# Create virtual.conf.j2
+cat <<EOF > /home/student/${problem_name}/templates/httpd.conf.j2
+<VirtualHost *:443>
+ServerName serverc.lab.example.com
+SSLEngine On
+SSLProtocol all -SSLv2 -SSLv3
+SSLCipherSuite HIGH:MEDIUM:!aNull:!MD5
+SSLHonorCipherOrder on
+SSLCertificateFile /etc/pki/tls/certs/serverc.lab.example.com.crt
+SSLCertificateKeyFile /etc/pki/tls/private/serverc.lab.example.com.key
+SSLCertificateChainFile /etc/pki/tls/certs/example-ca.crt
+DocumentRoot /srv/httpd/www
+</VirtualHost>
+<Directory /srv/httpd/www>
+Require all granted
+</Directory>
+<VirtualHost *:80>
+ServerName serverc.lab.example.com
+Redirect "/" "https://serverc.lab.example.com"
+</VirtualHost>
+EOF
+
+cat <<EOF > /home/student/${problem_name}/templates/hvirtual.conf.j2
+<VirtualHost *:443>
+ServerName virtual.lab.example.com
+SSLEngine On
+SSLProtocol all -SSLv2 -SSLv3
+SSLCipherSuite HIGH:MEDIUM:!aNull:!MD5
+SSLHonorCipherOrder on
+SSLCertificateFile /etc/pki/tls/certs/virtual.lab.example.com.crt
+SSLCertificateKeyFile /etc/pki/tls/private/virtual.lab.example.com.key
+SSLCertificateChainFile /etc/pki/tls/certs/example-ca.crt
+DocumentRoot /srv/virtual/www
+</VirtualHost>
+<Directory /srv/virtual/www>
+Require all granted
+</Directory>
+<VirtualHost *:80>
+ServerName virtual.lab.example.com
+Redirect "/" "https://virtual.lab.example.com"
+</VirtualHost>
+EOF
+
+# Create NGINX conf file
+# Create index files for httpd
+cat <<EOF > /home/student/${problem_name}/templates/nginx.conf.j2
+server {
+    listen 80 ;
+    server_name serverc.lab.example.com;
+    return 301 https://\$host\$request_uri;
+}
+server {
+    listen 443 ssl;
+    server_name serverc.lab.example.com;
+    ssl_certificate /etc/pki/tls/certs/serverc.lab.example.com.crt;
+    ssl_certificate_key /etc/pki/tls/private/serverc.lab.example.com.key;
+    location / {
+        root /srv/nginx/www/;
+        index index.html index.htm;
+    }
+}
+EOF
+
+#2nd virtual host for NGINX
+cat <<EOF > /home/student/${problem_name}/templates/nvirtual.conf.j2
+server {
+    listen 80 ;
+    server_name virtual.lab.example.com;
+    return 301 https://\$host\$request_uri;
+}
+server {
+    listen 443 ssl;
+    server_name virtual.lab.example.com;
+    ssl_certificate /etc/pki/tls/certs/virtual.lab.example.com.crt;
+    ssl_certificate_key /etc/pki/tls/private/virtual.lab.example.com.key;
+    location / {
+        root /srv/virtual/www/;
+        index index.html index.htm;
+    }
+}
+EOF
+
+# Create index files for default web server
+cat <<EOF > /home/student/${problem_name}/templates/index.html.j2
+<html>
+   <head>
+       <title>Welcome to serverc.lab.example.com !</title>
+   </head>
+   <body>
+   <h1>Success! The serverc.lab.example.com virtual host is working!</h1>
+   <p>This site is hosted on serverc.lab.example.com.</p>
+</body>
+</html>
+EOF
+
+# Create index files for virtual server
+cat <<EOF > /home/student/${problem_name}/templates/virtual.html.j2
+<html>
+   <head>
+       <title>Welcome to virtual.lab.example.com !</title>
+   </head>
+   <body>
+   <h1>Success! The virtual.lab.example.com virtual host is working!</h1>
+   <p>This site is hosted on serverc.lab.example.com.</p>
+</body>
+</html>
+EOF
+
+cat <<EOF > /home/student/${problem_name}/group_vars/webserver/vars.yml
+web_hosts:
+  - "serverc.lab.example.com"
+EOF
+
+
+cat <<EOF > /home/student/${problem_name}/deploy_content.yml
+- name: Document root exists for servers web site
+  file:
+    path: "/srv/FIX_ME/www"
+    state: directory
+    owner: root
+    mode: '0755'
+
+- name: Document root exists for virtual servers web site
+  file:
+    path: "/srv/virtual/www"
+    state: directory
+    owner: root
+    mode: '0755'
+
+- name: Index test pages are correct
+  template:
+    src: "index.html.j2"
+    dest: "/srv/FIX_ME/www/index.html"
+
+- name: Virtual index test pages are correct
+  template:
+    src: "virtual.html.j2"
+    dest: "/srv/virtual/www/index.html"
+
+- name: SELinux policy is correct for web site location
+  sefcontext:
+    target: '/srv/www(/.*)?'
+    setype: httpd_sys_content_t
+    state: present
+
+- name: Correct SELinux file context is on web content
+  file:
+    path: /srv/FIX_ME/www
+    state: directory
+    recurse: yes
+    follow: no
+    setype: _default
+
+- name: Correct SELinux file context is on web content
+  file:
+    path: /srv/virtual/www
+    state: directory
+    recurse: yes
+    follow: no
+    setype: _default
+
+- name: Serverc host TLS certs in place
+  copy:
+    src: "serverc.lab.example.com.crt"
+    dest: "/etc/pki/tls/certs"
+
+- name: Serverc host TLS private keys in place
+  copy:
+    src: "serverc.lab.example.com.key"
+    dest: "/etc/pki/tls/private"
+    mode: '0600'
+
+- name: Virtual host TLS certs in place
+  copy:
+    src: "virtual.lab.example.com.crt"
+    dest: "/etc/pki/tls/certs"
+
+- name: Virtual host TLS private keys in place
+  copy:
+    src: "virtual.lab.example.com.key"
+    dest: "/etc/pki/tls/private"
+    mode: '0600'
+
+- name: example.com CA cert in place
+  copy:
+    src: "example-ca.crt"
+    dest: "/etc/pki/tls/certs/example-ca.crt"
+EOF
+
+cat <<EOF > /home/student/${problem_name}/solutions/httpd.yml
+---
+- name: Apache HTTP Server web server deployment
+  hosts: webserver
+  become: true
+  tasks:
+    - name: Latest software installed for Apache HTTPD
+      yum:
+        name: "{{ item }}"
+        state: latest
+      loop:
+        - httpd
+        - mod_ssl
+      notify: Restart httpd
+
+    - name: Web content is in place
+      import_tasks: deploy_content.yml
+
+    - name: Serverc Virtual hosts are configured
+      template:
+        src: "httpd.conf.j2"
+        dest: "/etc/httpd/conf.d/httpd.conf"
+      notify: Reload httpd
+
+
+    - name: Virtual hosts are configured
+      template:
+        src: "hvirtual.conf.j2"
+        dest: "/etc/httpd/conf.d/virtual.conf"
+      notify: Reload httpd
+
+    - name: Web server is started and enabled
+      service:
+        name: httpd
+        state: started
+        enabled: yes
+
+    - name: Firewall ports are open
+      firewalld:
+        service: "{{ item }}"
+        permanent: yes
+        immediate: yes
+        state: enabled
+      loop:
+        - http
+        - https
+
+  handlers:
+    - name: Reload httpd
+      service:
+        name: httpd
+        state: reloaded
+    - name: Restart httpd
+      service:
+        name: httpd
+        state: restarted
+EOF
+
+cat <<EOF > /home/student/${problem_name}/solutions/nginx.yml
+---
+- name: Nginx web server deployment
+  hosts: webserver
+  become: true
+  tasks:
+    - name: Latest software installed for nginx
+      dnf:
+        name: "@nginx:1.16"
+        state: present
+      notify: Restart nginx
+
+    - name: Web content is in place
+      import_tasks: deploy_content.yml
+
+    - name: Set up nginx serverblock
+      template:
+        src: "nginx.conf.j2"
+        dest: "/etc/nginx/conf.d/nginx.conf"
+
+    - name: Set up nginx serverblock
+      template:
+        src: "nvirtual.conf.j2"
+        dest: "/etc/nginx/conf.d/virtual.conf"
+
+      notify: Reload nginx
+    - name: Firewall ports are open
+      firewalld:
+        service: "{{ item }}"
+        permanent: yes
+        immediate: yes
+        state: enabled
+      loop:
+        - https
+        - http
+    - name: Nginx is enabled and started
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+  handlers:
+    - name: Reload nginx
+      service:
+        name: nginx
+        state: reloaded
+    - name: Restart nginx
+      service:
+        name: nginx
+        state: restarted
+EOF
+ print_SUCCESS
+
+ #  dns_cname_create()
+   pad " · Creating the www alias for ${target_a}"
+   rhel_dns_cname_create virtual.lab.example.com,serverc.lab.example.com
+
+   if [ $? -eq 0 ]
+   then
+     print_SUCCESS
+   else
+     print_FAIL
+   fi
+
+
+  #serverc
+  pad " · Creating certificates for serverc"
+  rhel_certs_create serverc.lab.example.com \
+       virtual.lab.example.com
+  if [ $? -eq 0 ]
+   then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Copying the certificate to ${problem_name}"
+  cp /etc/pki/CA/example-ca.crt \
+     /home/student/${problem_name}/files/example-ca.crt
+
+  cp /etc/pki/CA/certs/serverc.lab.example.com.crt \
+     /etc/pki/CA/private/serverc.lab.example.com.key \
+     /etc/pki/CA/certs/virtual.lab.example.com.crt \
+     /etc/pki/CA/private/virtual.lab.example.com.key \
+     /home/student/${problem_name}/files/
+  print_SUCCESS
+
+  pad " · Copying the CA certificates to ${problem_name}"
+  cp /etc/pki/CA/cacert.pem /home/student/${problem_name}/files/
+  chown -R student: /home/student/${problem_name}
+  print_SUCCESS
+
+  pad " · Ensuring HTTPD package is not present:"
+  if ${ssh} ${target_a} "rpm -q httpd"
+  then
+    if ${ssh} ${target_a} "yum remove -y httpd"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    print_SUCCESS
+  fi
+
+  pad " · Ensuring Nginx package is removed:"
+  if ${ssh} ${target_a} "rpm -q nginx"
+  then
+    if ${ssh} ${target_a} "yum remove -y nginx"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    print_SUCCESS
+  fi
+  # Make sure http service is removed from firewall
+  pad " · Ensuring http and https services are removed from firewall:"
+  ${ssh} ${target_a} "firewall-cmd --permanent --remove-service=http"
+  ${ssh} ${target_a} "firewall-cmd --reload"
+  print_SUCCESS
+
+  print_line
+}
+
+
+function lab_grade {
+
+
+  print_header "Grading ${problem_name} exercise."
+
+  host_reachable ${target_a}
+
+  pad " · Confirm httpd or Nginx is installed on ${target_a}"
+  if ${ssh} ${target_a} 'rpm -q --quiet httpd' || ${ssh} ${target_a} 'rpm -q --quiet nginx'
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Checking for https access."
+  if ! curl -k https://${target_a}
+  then
+    print_FAIL
+  else
+    print_PASS
+  fi
+
+  pad " · Checking the HTTP redirection to HTTPS"
+  if curl -I  http://${target_a}.lab.example.com | egrep -q "301|302"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # Overall grade
+  print_line
+  pad 'Overall lab grade'
+  if [[ ${fail_count} -eq 0 ]]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+
+function lab_finish {
+
+  pad " · Removing the CNAME"
+  rhel_dns_cname_delete
+  if [ $? -eq 0 ]
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Removing the certificates for serverc"
+  # Always succeed
+  rhel_certs_delete serverc.lab.example.com
+
+  print_SUCCESS
+
+  pad " · Ensuring HTTPD package is removed:"
+  if ${ssh} ${target_a} "rpm -q httpd"
+  then
+    if ${ssh} ${target_a} "yum remove -y httpd"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    print_SUCCESS
+  fi
+
+  pad " · Ensuring Nginx package is removed:"
+  if ${ssh} ${target_a} "rpm -q nginx"
+  then
+    if ${ssh} ${target_a} "yum remove -y nginx"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    print_SUCCESS
+  fi
+
+
+
+  # Remove directories created with the exercise. /srv/*
+  pad " · Removing virtual server directories:"
+  ${ssh} ${target_a} "rm -rf /srv/*"
+  print_SUCCESS
+
+  # Remove directories created with the exercise. /etc/httpd/conf.d/serverdc.conf*
+  pad " · Removing configuration files:"
+  ${ssh} ${target_a} "rm -rf /etc/httpd/conf.d/"
+  print_SUCCESS
+
+  # remove the certificates and keys from serverc /etc/pki/tls/certs
+  pad " · Removing certificates:"
+  ${ssh} ${target_a} "rm -rf /etc/pki/tls/certs/*"
+  print_SUCCESS
+
+  # remove the certificates and keys from serverc /etc/pki/tls/private
+  pad " · Removing private keys:"
+  ${ssh} ${target_a} "rm -rf /etc/pki/tls/private/*"
+  print_SUCCESS
+
+  # Make sure http service is removed from firewall
+  pad " · Ensuring http service is removed from firewall:"
+  ${ssh} ${target_a} "firewall-cmd --permanent --remove-service=http --remove-service=https"
+  ${ssh} ${target_a} "firewall-cmd --reload"
+  print_SUCCESS
+
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

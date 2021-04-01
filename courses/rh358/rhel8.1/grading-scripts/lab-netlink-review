@@ -1,0 +1,162 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-netlink-review - start/finish script for RH358
+#
+# SYNOPSIS
+#     lab-netlink-review {start|grade|finish}
+#
+# DESCRIPTION
+#     This script performs the start, grade, and finish steps for the
+#     link aggregation lab for RH358. This script configures the 2nd NIC
+#     on serverd to have the 10.1.1.1/24 address.
+#
+# CHANGELOG
+#   * Fri Jul 24 2020 George Hacker <ghacker@redhat.com>
+#   - Properly download Ansible starting playbook
+#   * Wed Apr 29 2020 George Hacker <ghacker@redhat.com>
+#   - Suppress server headings per E2E QA feedback
+#   * Sat Apr 04 2020 George Hacker <ghacker@redhat.com>
+#   - Updated grading function to calculate interface names
+#   * Fri Apr 03 2020 George Hacker <ghacker@redhat.com>
+#   - original code
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin
+
+# Initialize and set some variables
+run_as_root='true'
+
+host='serverb'
+gateway='serverd'
+
+team_name='team1'
+iface_addr='10.1.1.10/24'
+ping_addr='10.1.1.1'
+
+ansible_proj_dir="/home/student/${problem_name}"
+
+declare -a valid_commands=(start grade finish)
+
+
+function lab_start {
+
+  print_header 'Starting netlink-review exercise.'
+  host_reachable ${host} ${gateway}
+
+  if ! gw_iface2=$(rhel_get_nicname ${gateway} 2); then
+    pad " · Error: unable to get gateway 2nd interface name - ${gateway}"
+    print_FAIL
+    exit 1
+  fi
+  if ! host_iface2=$(rhel_get_nicname ${host} 2); then
+    pad " · Error: unable to get host 2nd interface name - ${host}"
+    print_FAIL
+    exit 1
+  fi
+  if ! host_iface3=$(rhel_get_nicname ${host} 3); then
+    pad " · Error: unable to get host 3rd interface name - ${host}"
+    print_FAIL
+    exit 1
+  fi
+
+  # "Preparing ${host} for lab exercise work:"
+  rhel_install_ansible
+  rhel_config_ansible ${ansible_proj_dir}
+  rhel_team_destroy ${host} ${team_name}
+
+  # "Preparing ${gateway} for lab exercise work:"
+  rhel_config_nic ${gateway} ${gw_iface2} "${ping_addr}/24"
+
+  print_line
+}
+
+function lab_finish {
+
+  print_header 'Finishing netlink-review exercise'
+  host_reachable ${host} ${gateway}
+
+  if ! gw_iface2=$(rhel_get_nicname ${gateway} 2); then
+    pad " · Error: unable to get gateway 2nd interface name - ${gateway}"
+    print_FAIL
+    exit 1
+  fi
+
+  # "Restoring ${host} from lab exercise work:"
+  rhel_team_destroy ${host} ${team_name}
+
+  # "Restoring ${gateway} from lab exercise work:"
+  rhel_unconfig_nic ${gateway} ${gw_iface2}
+
+  print_line
+}
+
+function lab_grade {
+
+  print_header 'Grading netlink-review exercise.'
+  print_line
+  host_reachable ${host}
+
+  if ! host_iface2=$(rhel_get_nicname ${host} 2); then
+    pad " · Error: unable to get host 2nd interface name - ${host}"
+    print_FAIL
+    exit 1
+  fi
+  if ! host_iface3=$(rhel_get_nicname ${host} 3); then
+    pad " · Error: unable to get host 3rd interface name - ${host}"
+    print_FAIL
+    exit 1
+  fi
+
+  # Connection named team1 with an interface named team1 found
+  pad " · Confirming ${team_name} network team exists"
+  nmcli_output=$(${ssh} ${host} "nmcli con show '${team_name}'")
+  if [[ -n "${nmcli_output}" ]]; then
+    print_PASS
+    # The team1 connection has an IPv4 address of 10.1.1.10/24
+    pad " · Network team has ${iface_addr} address"
+    if echo "${nmcli_output}" | grep -q "^ipv4\.addresses:.* ${iface_addr}"; then
+      print_PASS
+    else
+      print_FAIL
+    fi
+    # Slave connections are configured and active, team1-port1 and team1-port2
+    pad ' · Slave connections are configured and active'
+    nmcli_output=$(${ssh} ${host} 'nmcli con show')
+    if echo "${nmcli_output}" | grep -q "^${team_name}-port1.*${host_iface2}" &&
+       echo "${nmcli_output}" | grep -q "^${team_name}-port2.*${host_iface3}"; then
+      print_PASS
+    else
+      print_FAIL
+    fi
+    # Network team team1 uses the activebackup runner
+    pad ' · Network team uses the activebackup runner'
+    teamdctl_output=$(${ssh} ${host} "teamdctl ${team_name} state")
+    if echo "${teamdctl_output}" | grep -q '^  runner: activebackup'; then
+      print_PASS
+    else
+      print_FAIL
+    fi
+    # Able to ping 10.1.1.1
+    pad " · Able to ping ${ping_addr}"
+    if ${ssh} ${host} "ping -c1 -w2 ${ping_addr}"; then
+      print_PASS
+    else
+      print_FAIL
+    fi
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

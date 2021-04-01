@@ -1,0 +1,12 @@
+---
+- name: Deploy Database Review Materials
+  import_playbook: deploy_database.yml
+
+- name: Deploy Web Optimization Review Materials
+  import_playbook: deploy_weboptimize.yml
+
+- name: Deploy Email Review Materials
+  import_playbook: deploy_smtp.yml
+
+# - name: Deploy Web Review Materials
+#   import_playbook: deploy_web.yml

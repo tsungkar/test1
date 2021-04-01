@@ -1,0 +1,31 @@
+---
+- name: Restore inventory database if not present
+  hosts: db_servers
+  become: yes
+
+  tasks:
+    - name: Make sure inventory database exists
+      FIXME:
+        name: FIXME
+        state: FIXME
+      register: inventory_present
+
+    - name: Is inventory database backup present?
+      stat:
+        path: /srv/inventory-database.sql
+      register: inventory_bkup
+
+    - name: Copy database backup file to host if not present
+      copy:
+        src: files/inventory-database.sql
+        dest: /srv
+      when:
+        - inventory_present['changed'] == true
+        - inventory_bkup['stat']['exists'] == false
+
+    - name: Restore inventory backup data
+      FIXME:
+        name: FIXME
+        state: FIXME
+        target: /srv/inventory-database.sql
+      when: inventory_present['changed'] == true

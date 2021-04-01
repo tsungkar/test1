@@ -1,0 +1,130 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-dns-tshooting - grading script for RH358 Troubleshooting DNS Issues
+#                         guided exercise.
+#
+# SYNOPSIS
+#     lab-dns-tshooting {start|finish}
+#
+#        start   - prepare the system for starting the lab
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start, or finish
+#     for the RH358 Troubleshooting DNS Issues guided exercise.
+#
+# CHANGELOG
+#   * Mon May 05 2020 Victor Costea <vcostea@redhat.com>
+#   - Replace labname with problem_name variable
+#   - Change path of ge_playbook_dir variable
+#   * Fri Mar 27 2020 Victor Costea <vcostea@redhat.com>
+#   - original code
+
+#########################################################################
+#########################################################################
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+target='servera'
+
+ge_playbook_dir="classroom/ansible/${problem_name}"
+ge_playbook_tar="${problem_name}.tar"
+ge_playbook_start='tshoot_resolv_start.yml'
+ge_playbook_finish='tshoot_resolv_finish.yml'
+
+# This defines which subcommands are supported (start, grade, etc.).
+# Corresponding lab_COMMAND functions must be defined.
+declare -a valid_commands=(start finish)
+
+function lab_start {
+
+  print_header "Starting ${problem_name} exercise."
+
+  host_reachable ${target}
+
+  # Clear lab files from tmp dir
+  rm -rf /tmp/${problem_name}
+
+  # Create /tmp/problem_name directory
+  mkdir /tmp/${problem_name}
+
+  # Download resolv.conf GE start file
+  pad ' · Download exercise playbooks'
+  cmd1="curl -o /tmp/${ge_playbook_tar} http://materials.example.com/${ge_playbook_dir}/${ge_playbook_tar}"
+  if ${cmd1}
+  then
+    tar -xf /tmp/${ge_playbook_tar} -C /tmp
+    rm -rf /tmp/${ge_playbook_tar}
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  # Run playbook to prepare GE exercise
+  pad ' · Run exercise preparation playbooks'
+  cmd2="ansible-playbook ${ge_playbook_start}"
+  cd /tmp/${problem_name}
+  if ${cmd2}
+  then
+    cd
+    rm -rf /tmp/${problem_name}
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+function lab_finish {
+
+  print_header "Finishing ${problem_name} exercise."
+
+  host_reachable ${target}
+
+  # Clear lab files from tmp dir
+  rm -rf /tmp/${problem_name}
+
+  # Create /tmp/problem_name directory
+  mkdir /tmp/${problem_name}
+
+  # Download resolv.conf GE start file
+  pad ' · Download exercise playbooks'
+  cmd1="curl -o /tmp/${ge_playbook_tar} http://materials.example.com/${ge_playbook_dir}/${ge_playbook_tar}"
+  if ${cmd1}
+  then
+    tar -xf /tmp/${ge_playbook_tar} -C /tmp
+    rm -rf /tmp/${ge_playbook_tar}
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  # Run playbook to prepare GE exercise
+  pad ' · Run exercise cleanup playbooks'
+  cmd2="ansible-playbook ${ge_playbook_finish}"
+  cd /tmp/${problem_name}
+  if ${cmd2}
+  then
+    cd
+    rm -rf /tmp/${problem_name}
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

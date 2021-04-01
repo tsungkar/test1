@@ -1,0 +1,43 @@
+---
+- name: Deploy Nginx Web Server
+  hosts:
+  become: true
+
+  vars:
+    web_hosts:
+      - ""
+    web_ports:
+      -
+      -
+    nginx_packages:
+      - '@nginx:1.16'
+    cacert_file: "example-ca.crt"
+
+  tasks:
+    - name: Install latest Nginx software
+      yum:
+        name: ""
+        state:
+
+    - name: Deploy web content
+      import_tasks: deploy_content.yml
+
+    - name: Define the Nginx server block
+      template:
+        src: ""
+        dest: ""
+      loop: "{{ web_hosts }}"
+
+    - name: Open the web services firewall ports
+      firewalld:
+        service: ""
+        permanent:
+        immediate:
+        state:
+      loop: "{{ web_ports }}"
+
+    - name: Start and enable the Nginx service
+      service:
+        name:
+        state:
+        enabled:

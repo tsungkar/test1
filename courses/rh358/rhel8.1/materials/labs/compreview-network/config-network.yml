@@ -1,0 +1,8 @@
+---
+
+- name: Configure network interface
+  hosts:
+  become: true
+
+  roles:
+    -

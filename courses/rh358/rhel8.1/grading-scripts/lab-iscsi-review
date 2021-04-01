@@ -1,0 +1,606 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     iscsi-review - grading script for RH358 Accessing Block-Based Network
+#                    Storage lab
+#
+# SYNOPSIS
+#     iscsi-review {start|grade|finish}
+#
+#        start   - prepare the system for starting the lab
+#        grade   - perform evaluation steps on the system
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start, grading,
+#     or finish for the Accessing Block-Based Network Storage lab.
+#
+# CHANGELOG
+#   * Thu May 14 2020 Herve Quatremain <hquatrem@redhat.com>
+#   - original code
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+target='serverd'
+target_a='servera'
+second_disk_device='vdb'
+
+blockstore='store1.disk1'
+targetIQN='iqn.2014-06.com.example:store1'
+UUID='55966983-f99f-4123-b7ce-7bdf1f491563'
+
+
+# This defines which subcommands are supported (start, grade, etc.).
+# Corresponding lab_COMMAND functions must be defined.
+declare -a valid_commands=(start grade finish)
+
+
+
+function disk_cleanup {
+  for i in {5..1}
+  do
+    if ${ssh} ${target} "test -b /dev/${second_disk_device}$i"
+    then
+      ${ssh} ${target} "umount -l /dev/${second_disk_device}$i"
+      ${ssh} ${target} "swapoff /dev/${second_disk_device}$i"
+      ${ssh} ${target} "dd if=/dev/zero of=/dev/${second_disk_device}$i bs=512 count=10"
+      ${ssh} ${target} "parted --script /dev/${second_disk_device} rm $i"
+    fi
+  done
+  ${ssh} ${target} "wipefs --all --force /dev/${second_disk_device}"
+  ${ssh} ${target} "test -b /dev/${second_disk_device} && dd if=/dev/zero of=/dev/${second_disk_device} bs=1024 count=2048"
+}
+
+
+function lab_start {
+
+  print_header 'Starting lab.'
+
+  print_line "Preparing ${target_a} and ${target} for lab exercise work:"
+  print_line
+  host_reachable ${target_a} ${target}
+
+  #
+  # workstation: installing the required packages and deploying the project
+  #
+
+  rhel_install_ansible
+
+  pad " · Installing the rhel-system-roles package on workstation"
+  if yum install -y rhel-system-roles
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  if [ -e "/home/student/${problem_name}" ]
+  then
+    pad " · Saving existing ~/${problem_name}"
+    if mv /home/student/${problem_name} /home/student/${problem_name}.$(date +%m-%d-%H:%M:%S)
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  pad " · Deploying the Ansible files on workstation"
+  mkdir -p /home/student/${problem_name}/{templates,.solution}
+  cat <<EOF > /home/student/${problem_name}/ansible.cfg
+[defaults]
+inventory=inventory
+remote_user=devops
+EOF
+  cat <<EOF > /home/student/${problem_name}/inventory
+[initiators]
+${target_a}.lab.example.com
+EOF
+  cat <<EOF > /home/student/${problem_name}/templates/initiatorname.iscsi.j2
+InitiatorName=iqn.2014-06.com.example:{{ ansible_facts['hostname'] }}
+EOF
+  cat <<EOF > /home/student/${problem_name}/playbook.yml
+---
+- name: Ensure /iscsidisk is mounted from ${target} iSCSI target
+  hosts: initiators
+  become: true
+
+  tasks:
+    - name: the iSCSI initiator software installed
+      #FIXME: install the required package
+
+    - name: the IQN is set for the initiator
+      #FIXME: set the initiator IQN to iqn.2014-06.com.example:${target_a}
+      notify: restart iscsid
+
+    # Forces the handler to run so that the iscsid service is restarted
+    # and is aware of the new initiator IQN
+    - meta: flush_handlers
+
+    - name: the iSCSI target is discovered and available
+      #FIXME: discover and log into the target.
+      #       Target IQN: ${targetIQN}
+      #       Portal: 172.25.250.13 (port 3260)
+      register: target
+
+    - name: display the discovered devices
+      debug:
+        msg: The new device is {{ target['devicenodes'][0] }}
+
+    - name: the new device is formatted and mounted under /iscsidisk
+      include_role:
+        name: rhel-system-roles.storage
+      vars:
+        #FIXME: mount target['devicenodes'][0] into /iscsidisk
+        #       If the device is not yet formatted in ext4, format it.
+        #       Use the proper mount option for an iSCSI disk.
+
+  handlers:
+    - name: restart iscsid
+      service:
+        name: iscsid
+        state: restarted
+EOF
+  cat <<EOF > /home/student/${problem_name}/.solution/playbook.yml
+---
+- name: Ensure /iscsidisk is mounted from ${target} iSCSI target
+  hosts: initiators
+  become: true
+
+  tasks:
+    - name: the iscsi-initiator-utils package is installed
+      yum:
+        name: iscsi-initiator-utils
+        state: present
+
+    - name: the IQN is set for the initiator
+      copy:
+        dest: /etc/iscsi/initiatorname.iscsi
+        content: "InitiatorName=iqn.2014-06.com.example:{{ ansible_facts['hostname'] }}\n"
+        mode: '644'
+        owner: root
+        group: root
+      notify: restart iscsid
+
+    # Forces the handler to run so that the iscsid service is restarted
+    # and is aware of the new initiator IQN
+    - meta: flush_handlers
+
+    - name: the iSCSI target is discovered and available
+      open_iscsi:
+        portal: 172.25.250.13
+        port: '3260'
+        target: ${targetIQN}
+        discover: yes
+        login: yes
+      register: target
+
+    - name: display the discovered devices
+      debug:
+        msg: The new device is {{ target['devicenodes'][0] }}
+
+    - name: the new device is formatted and mounted under /iscsidisk
+      include_role:
+        name: rhel-system-roles.storage
+      vars:
+        storage_volumes:
+          - name: devdata
+            state: present
+            type: disk
+            disks:
+              - "{{ target['devicenodes'][0] }}"
+            mount_point: /iscsidisk
+            fs_type: ext4
+            mount_options: '_netdev'
+
+  handlers:
+    - name: restart iscsid
+      service:
+        name: iscsid
+        state: restarted
+EOF
+  cat <<EOF > /home/student/${problem_name}/.solution/cleanup.yml
+---
+- name: Ensure /iscsidisk is not mounted
+  hosts: initiators
+  become: true
+
+  tasks:
+    - name: the /iscsidisk file system is unmounted
+      mount:
+        path: /iscsidisk
+        state: absent
+
+    - name: the iSCSI target is disconnected
+      open_iscsi:
+        portal: 172.25.250.13
+        port: '3260'
+        target: ${targetIQN}
+        discover: no
+        login: no
+        auto_node_startup: no
+      ignore_errors: yes
+
+    - name: the iscsi-initiator-utils package is not installed
+      yum:
+        name: iscsi-initiator-utils
+        state: absent
+
+    - name: the iSCSI configuration files are not present
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/iscsi
+        - /var/lib/iscsi
+        - /var/lock/iscsi
+EOF
+  chown -R student: /home/student/${problem_name}
+  print_SUCCESS
+
+  #
+  # servera
+  #
+
+  pad " · Backing up /etc/fstab on ${target_a}"
+  if ${ssh} ${target_a} "test -s /var/tmp/lab-${problem_name}-fstab || cp /etc/fstab /var/tmp/lab-${problem_name}-fstab"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Deploying the help file on ${target_a}"
+  if ${ssh} ${target_a} "mkdir -p /root/${problem_name}"
+  then
+    cat <<EOF | ${ssh} ${target_a} "cat > /root/${problem_name}/iscsi.txt"
+     Initiator IQN: iqn.2014-06.com.example:${target_a}
+        Target IQN: ${targetIQN}
+    Portal address: 172.25.250.13 (port 3260)
+       Mount point: /iscsidisk
+EOF
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  #
+  # serverd: preparing the block device
+  #
+
+  pad " · Cleaning up spare disk ${second_disk_device} on ${target}"
+  disk_cleanup
+  print_SUCCESS
+
+  pad " · Preparing ${second_disk_device} on ${target}"
+  if ${ssh} ${target} "mkfs.ext4 -F -F -U ${UUID} /dev/${second_disk_device} && mount /dev/${second_disk_device} /mnt && cp /var/log/messages /mnt/report.txt && umount /mnt"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Deploying the help file on ${target}"
+  if ${ssh} ${target} "mkdir -p /root/${problem_name}"
+  then
+    cat <<EOF | ${ssh} ${target} "cat > /root/${problem_name}/iscsi.txt"
+      Block device: /dev/${second_disk_device}
+Backing store name: ${blockstore}
+        Target IQN: ${targetIQN}
+     Initiator IQN: iqn.2014-06.com.example:${target_a}
+    Portal address: 172.25.250.13 (port 3260)
+EOF
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+function lab_grade {
+
+  print_header "Grading the student's work on ${target_a} and ${target}:"
+  host_reachable ${target_a} ${target}
+
+  pad " · The targetcli package is installed on ${target}"
+  if ${ssh} ${target} "rpm -q targetcli"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The target service is running on ${target}"
+  if ${ssh} ${target} "systemctl is-active target"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The target service is enabled on ${target}"
+  if ${ssh} ${target} "systemctl is-enabled target"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Firewall port 3260 is opened on ${target}"
+  ${ssh} ${target} "firewall-cmd --list-all" | grep -wq -e 3260 -e iscsi-target
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The target blockstore is ${blockstore}"
+  TMP_FILE=$(mktemp)
+  ${ssh} ${target} "targetcli ls" > "${TMP_FILE}"
+  if grep -A 3 " block " "${TMP_FILE}" | grep -wq "${blockstore}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The blockstore device is ${second_disk_device}"
+  if grep -q "/dev/${second_disk_device} " "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The target IQN is ${targetIQN}"
+  if grep -wq "${targetIQN}" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The target has an ACL for iqn.2014-06.com.example:${target_a}"
+  if grep -A 1000 " acls " "${TMP_FILE}" | grep -wq "iqn.2014-06.com.example:${target_a}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The LUN is mapped to the ${blockstore} blockstore"
+  if grep -A 1000 " luns " "${TMP_FILE}" | grep -wq "block/${blockstore}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The portal is set to 172.25.250.13:3260"
+  if grep -wq "172.25.250.13:3260" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The target configuration is saved"
+  if ${ssh} ${target} "test -s /etc/target/saveconfig.json"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The iscsi-initiator-utils package is installed on ${target_a}"
+  if ${ssh} ${target_a} "rpm -q iscsi-initiator-utils"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The initiator IQN is iqn.2014-06.com.example:${target_a}"
+  if ${ssh} ${target_a} grep iqn.2014-06.com.example:${target_a} /etc/iscsi/initiatorname.iscsi
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${target_a} is using the 172.25.250.13:3260 portal"
+  ${ssh} ${target_a} "iscsiadm -m session -P 3" > "${TMP_FILE}"
+  if grep -q "Persistent Portal:.*172.25.250.13:3260" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · ${target_a} is connected to ${targetIQN}"
+  if grep -qw "${targetIQN}" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The file system on the iSCSI device is preserved"
+  if ${ssh} ${target_a} "lsblk --fs | grep ${UUID}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The /iscsidisk directory exists"
+  if ${ssh} ${target_a} "test -d /iscsidisk"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The file system is mounted on /iscsidisk"
+  DEVICE=$(awk '/Attached scsi disk/ { print $4 }' "${TMP_FILE}")
+  if [ -z "${DEVICE}" ]
+  then
+    DEVICE='unkwonw'
+  fi
+  if ${ssh} ${target_a} "df /iscsidisk | grep -w ${DEVICE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The file system is declared in /etc/fstab"
+  ${ssh} ${target_a} "grep -e ${UUID} -e /dev/${DEVICE} /etc/fstab" > "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The correct mount option is used in /etc/fstab"
+  if grep -qw _netdev "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The correct file system type is used in /etc/fstab"
+  if grep -qw ext4 "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The /iscsidisk mount point is used in /etc/fstab"
+  if grep -qw /iscsidisk "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  rm -rf "${TMP_FILE}"
+
+  # Overall grade
+  print_line
+  pad 'Overall lab grade'
+  if [[ ${fail_count} -eq 0 ]]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+
+function lab_finish {
+
+  print_header "Cleaning up the lab on ${target_a} and ${target}:"
+  host_reachable ${target_a} ${target}
+
+  #
+  # servera
+  #
+
+  pad " · Unmounting /iscsidisk from ${target_a}"
+  TMP_FILE=$(mktemp)
+  ${ssh} ${target_a} "iscsiadm -m session -P 3" > "${TMP_FILE}"
+  DEVICE=$(awk '/Attached scsi disk/ { print $4 }' "${TMP_FILE}")
+  TARGET=$(awk '/Target:/ { print $2 }' "${TMP_FILE}")
+  PORTAL=$(awk '/Persistent Portal:/ { print $NF }' "${TMP_FILE}")
+  rm -f "${TMP_FILE}"
+  ${ssh} ${target_a} "umount /iscsidisk"
+  if [ -n "${DEVICE}" ]
+  then
+    for i in {5..1}
+    do
+      if ${ssh} ${target_a} "test -b /dev/${DEVICE}$i"
+      then
+        ${ssh} ${target_a} "umount -l /dev/${DEVICE}$i"
+        ${ssh} ${target_a} "swapoff /dev/${DEVICE}$i"
+      fi
+    done
+    ${ssh} ${target_a} "umount -l /dev/${DEVICE}"
+  fi
+  ${ssh} ${target_a} "rm -rf /iscsidisk"
+  print_SUCCESS
+
+  pad " · Restoring /etc/fstab on ${target_a}"
+  ${ssh} ${target_a} "test -s /var/tmp/lab-${problem_name}-fstab && cp /var/tmp/lab-${problem_name}-fstab /etc/fstab ; rm -f /var/tmp/lab-${problem_name}-fstab"
+  print_SUCCESS
+
+  pad " · Logging out of the target on ${target_a}"
+  if [ -n "${TARGET}" -a -n "${PORTAL}" ]
+  then
+    ${ssh} ${target_a}  "iscsiadm -m node -T ${TARGET} -p ${PORTAL} -u ; iscsiadm -m node -T ${TARGET} -p ${PORTAL} -o delete"
+  fi
+  print_SUCCESS
+
+  pad " · Removing the iscsi-initiator-utils package from ${target_a}"
+  ${ssh} ${target_a} "yum remove -y iscsi-initiator-utils ; rm -rf /var/lib/iscsi /var/lock/iscsi /etc/iscsi"
+  print_SUCCESS
+
+  pad " · Removing the help file from ${target_a}"
+  ${ssh} ${target_a} "rm -rf /root/${problem_name}"
+  print_SUCCESS
+
+  #
+  # serverd: deleting the iSCSI target
+  #
+
+  pad " · Closing the firewall port on ${target}"
+  ${ssh} ${target} 'firewall-cmd --remove-service=iscsi-target --permanent ; firewall-cmd --remove-port=3260/tcp --permanent ; firewall-cmd --reload'
+  print_SUCCESS
+
+  pad " · Cleaning up the target on ${target}"
+  ${ssh} ${target} "targetcli clearconfig confirm=True"
+  print_SUCCESS
+
+  pad " · Removing the targetcli package from ${target}"
+  ${ssh} ${target} "yum remove -y targetcli target-restore ; rm -rf /etc/target /var/target"
+  print_SUCCESS
+
+  pad " · Cleaning up spare disk ${second_disk_device} on ${target}"
+  disk_cleanup
+  print_SUCCESS
+
+  pad " · Removing the help file from ${target}"
+  ${ssh} ${target} "rm -rf /root/${problem_name}"
+  print_SUCCESS
+
+  #
+  # workstation: removing the rhel-system-roles package
+  #
+
+  pad " · Removing the rhel-system-roles package from workstation"
+  yum remove -y rhel-system-roles
+  print_SUCCESS
+
+  print_line
+  print_line 'Lab finished.'
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

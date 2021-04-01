@@ -1,0 +1,256 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-printing-review - grading script for RH358 Managing Printers
+#                           and Printing Files lab.
+#
+# SYNOPSIS
+#     lab-printing-review {start|grade|finish}
+#
+#        start   - prepare the system for starting the lab
+#        grade   - perform evaluation steps on the system
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start, grade,
+#     or finish for the RH358 Managing Printers and Printing Files lab.
+#
+# CHANGELOG
+#   * Thu Jul 02 2020 George Hacker <ghacker@redhat.com>
+#   - Call rhel_config_ansible() to download student project files
+#   * Fri May 15 2020 George Hacker <ghacker@redhat.com>
+#   - original code
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+
+queue_name='lab-printer'
+
+disable_pb='printer-disable.yml'
+enable_pb='printer-enable.yml'
+timeout='20'
+
+ansible_host='workstation'
+student_host='serverb'
+cups_server='serverc'
+ippsample_server='serverd'
+
+lab_playbook_dir='classroom/ansible'
+lab_playbook_tar="${problem_name}.tar"
+lab_playbook_start="${problem_name}-start.yml"
+lab_playbook_finish="${problem_name}-finish.yml"
+tmp_dir="/tmp/${problem_name}"
+
+ansible_proj_dir='/home/student/printing-review'
+
+declare -a valid_commands=(start grade finish)
+
+function lab_start {
+
+  print_header "Starting ${problem_name} exercise."
+
+  host_reachable ${student_host} ${cups_server} ${ippsample_server}
+
+  # Download student project files
+  rhel_config_ansible ${ansible_proj_dir}
+
+  # Create /tmp/problem_name directory and cd there
+  rm -rf ${tmp_dir} ; mkdir -p ${tmp_dir}
+  if ! cd ${tmp_dir}
+  then
+    pad ' · Error: unable to create staging directory'
+    print_FAIL
+    exit 1
+  fi
+
+  # Download lab start playbook
+  pad ' · Download lab playbooks'
+  cmd1="curl -O http://materials.example.com/${lab_playbook_dir}/${lab_playbook_tar}"
+  cmd2="tar xf ${lab_playbook_tar} -C /tmp"
+  if ${cmd1} && ${cmd2}
+  then
+    rm -f ${lab_playbook_tar}
+    print_SUCCESS
+    # Run lab start playbook
+    pad ' · Run lab preparation playbook'
+    if ansible-playbook ${lab_playbook_start} & spinner $! 3
+    then
+      cd
+      rm -rf ${tmp_dir}
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+function lab_grade {
+
+  print_header "Grading ${problem_name} exercise."
+
+  host_reachable ${student_host} ${cups_server} ${ippsample_server}
+
+  pad " · Confirm ${student_host} can discover networked printers"
+  if ${ssh} ${student_host} 'ippfind -T 5'
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Confirm the ${queue_name} print queue exists on ${student_host}"
+  if ${ssh} ${student_host} "lpstat -p ${queue_name}"
+  then
+    print_PASS
+
+    pad " · Confirm ${queue_name} jobs go to the correct destination"
+    cmd1="lpstat -v -p lab-printer"
+    cmd2="grep -q 'device.*: ipp://serverc.*:631/printers/rht-printer'"
+    if ${ssh} ${student_host} "${cmd1} | ${cmd2}"
+    then
+      print_PASS
+    else
+      print_FAIL
+    fi
+
+    pad " · Confirm ${queue_name} uses the correct PPD"
+    cmd1="grep 'ModelName.*Everywhere Basic Printer Simulator' /etc/cups/ppd/${queue_name}.ppd"
+    if ${ssh} ${student_host} "${cmd1}"
+    then
+      print_PASS
+    else
+      print_FAIL
+    fi
+
+    pad " · Confirm ${queue_name} is the default print queue on ${student_host}"
+    cmd1="lpstat -d"
+    cmd2="grep -q 'system default destination: ${queue_name}'"
+    if ${ssh} ${student_host} "${cmd1} | ${cmd2}"
+    then
+      print_PASS
+    else
+      print_FAIL
+    fi
+
+    pad " · Configure ${queue_name} to accept and print submitted jobs"
+    cmd1="cupsaccept ${queue_name}"
+    cmd2="cupsenable ${queue_name}"
+    ${ssh} ${student_host} "${cmd1} ; ${cmd2}"
+    print_SUCCESS
+
+    pad " · Run the ${disable_pb} playbook"
+    cmd1="cd ${ansible_proj_dir}"
+    cmd2="ansible-playbook ${disable_pb}"
+    if su - student -c "${cmd1} && ${cmd2}"
+    then
+      print_SUCCESS
+      pad ' · Confirm playbook worked, suspending printing'
+      ${ssh} student@${student_host} "ls -al | lp -s -d ${queue_name}"
+      sleep ${timeout} & spinner $! 2
+      cmd1="lpstat -o ${queue_name}"
+      if ${ssh} ${student_host} "${cmd1}" | grep -q "${queue_name}"
+      then
+        print_PASS
+      else
+        print_FAIL
+      fi
+    else
+      print_FAIL
+    fi
+
+    pad " · Configure ${queue_name} to accept, but suspend printing"
+    cmd1="cupsaccept ${queue_name}"
+    cmd2="cupsdiable ${queue_name}"
+    ${ssh} ${student_host} "${cmd1} ; ${cmd2}"
+    print_SUCCESS
+
+    pad " · Run the ${enable_pb} playbook"
+    cmd1="cd ${ansible_proj_dir}"
+    cmd2="ansible-playbook ${enable_pb}"
+    if su - student -c "${cmd1} && ${cmd2}"
+    then
+      print_SUCCESS
+      pad ' · Confirm playbook worked, printing resumed'
+      ${ssh} student@${student_host} "ls -al | lp -s -d ${queue_name}"
+      sleep ${timeout} & spinner $! 2
+      cmd1="lpstat -o ${queue_name}"
+      if ${ssh} ${student_host} "${cmd1}" | grep -q "${queue_name}"
+      then
+        print_FAIL
+      else
+        print_PASS
+      fi
+    else
+      print_FAIL
+    fi
+
+  else
+    print_FAIL
+  fi
+
+  # Overall grade
+  print_line
+  pad 'Overall lab grade'
+  if [[ ${fail_count} -eq 0 ]]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+function lab_finish {
+
+  print_header "Finishing ${problem_name} exercise."
+
+  host_reachable ${student_host} ${cups_server} ${ippsample_server}
+
+  # Create /tmp/problem_name directory and cd there
+  rm -rf ${tmp_dir} ; mkdir -p ${tmp_dir}
+  if ! cd ${tmp_dir}
+  then
+    pad ' · Error: unable to create staging directory'
+    print_FAIL
+    exit 1
+  fi
+
+  # Download GE finish playbook
+  pad ' · Download lab playbooks'
+  cmd1="curl -O http://materials.example.com/${lab_playbook_dir}/${lab_playbook_tar}"
+  cmd2="tar xf ${lab_playbook_tar} -C /tmp"
+  if ${cmd1} && ${cmd2}
+  then
+    rm -f ${lab_playbook_tar}
+    print_SUCCESS
+    # Run lab finish playbook
+    pad ' · Run lab cleanup playbook'
+    if ansible-playbook ${lab_playbook_finish} & spinner $! 3
+    then
+      cd
+      rm -rf ${tmp_dir}
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

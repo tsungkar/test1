@@ -1,0 +1,752 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-dhcp-review - grading script for RH358 Managing DHCP and IP Address
+#                       Assignment lab
+#
+# SYNOPSIS
+#     lab-dhcp-review {start|finish}
+#
+#        start   - prepare the system for starting the lab
+#        grade   - perform evaluation steps on the system
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start, grading,
+#     or finish for the Managing DHCP and IP Address Assignment lab.
+#
+# CHANGELOG
+#   * Fri Apr 10 2020 Herve Quatremain <hquatrem@redhat.com>
+#   - original code
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+
+prefix_secondary='fde2:6494:1e09:2'
+
+# MAC address of the first/main interface
+# All the other interfaces are disabled by the lab_start() function
+mac_a='52:54:00:00:fa:0a'
+mac_b='52:54:00:00:fa:0b'
+mac_c='52:54:00:00:fa:0c'
+mac_d='52:54:00:00:fa:0d'
+
+mac_secondary_a='52:54:00:01:fa:0a'
+mac_secondary_b='52:54:00:01:fa:0b'
+mac_secondary_c='52:54:00:01:fa:0c'
+
+target_a='servera'
+target_b='serverb'
+target_c='serverc'
+target_d='serverd'
+
+router='serverd'
+mac_secondary_router='52:54:00:01:fa:0d'
+IP_secondary_router="${prefix_secondary}::d"
+
+files_to_backup="/etc/sysconfig/network-scripts/ifcfg-* /etc/resolv.conf /etc/hosts /etc/machine-id"
+
+subnet='10.1.1'
+connection_name='lab-conn'
+
+
+# This defines which subcommands are supported (start, grade, etc.).
+# Corresponding lab_COMMAND functions must be defined.
+declare -a valid_commands=(start grade finish)
+
+
+function lab_start {
+
+  print_header 'Starting lab.'
+
+  print_line "Preparing ${target_a}, ${target_b}, ${target_c}, and ${target_d} for lab exercise work:"
+  print_line
+  host_reachable ${target_a} ${target_b} ${target_c} ${target_d}
+
+  for target_mac in ${target_a},${mac_a} ${target_b},${mac_b} ${target_c},${mac_c} ${target_d},${mac_d}
+  do
+    target=${target_mac%%,*}
+    mac=${target_mac##*,}
+
+    # Disabling autoconnect on all the connections associated with the second
+    # and third network interfaces.  This way, we make sure that those
+    # interfaces will not pickup a DHCP lease as soon as the DHCP server goes up.
+    pad " · Deactivating the secondary interfaces on ${target}"
+
+    # Retrieving all the interface names but skip lo and the main interface
+    for INTERFACE in $(${ssh} ${target} 'ip -brief link show' | awk -v MAC=${mac} 'BEGIN { IGNORECASE = 1;} $1 !~ /lo/ && $3 != MAC { print $1}')
+    do
+      # For all the NetworkManager connections associated with the interface,
+      # disable autoconnect and stop the connection
+      for CON in $(${ssh} ${target} 'nmcli --get-values UUID connection show')
+      do
+        ${ssh} ${target} "nmcli --get-values connection.interface-name,GENERAL.DEVICES con show '${CON}'" | grep -wq "${INTERFACE}"
+        if [ $? -eq 0 ]
+        then
+          ${ssh} ${target} "nmcli con mod '${CON}' connection.autoconnect no ; nmcli --wait 0 con down '${CON}'"
+        fi
+      done
+      ${ssh} ${target} "nmcli dev dis ${INTERFACE}"
+    done
+    print_SUCCESS
+
+    pad " · Backing up network configuration on ${target}"
+    if ${ssh} ${target} "test -s /var/tmp/lab-${problem_name}.tgz || tar zcf /var/tmp/lab-${problem_name}.tgz --xattrs -C / ${files_to_backup}"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    pad " · Generating a new machine ID on ${target}"
+    if ${ssh} ${target} 'rm -f /etc/machine-id ; systemd-machine-id-setup ; test -s /etc/machine-id'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    pad " · Restarting NetworkManager on ${target}"
+    if ${ssh} ${target} 'systemctl restart NetworkManager'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  done
+
+
+  #
+  # workstation: installing the required packages
+  #
+
+
+  rhel_install_ansible
+
+  pad " · Installing the rhel-system-roles package on workstation"
+  if yum install -y rhel-system-roles
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+
+  #
+  # workstation: deploying the Ansible files for student
+  #
+
+  if [ -e "/home/student/${problem_name}" ]
+  then
+    pad " · Saving existing ~/${problem_name}"
+    if mv /home/student/${problem_name} /home/student/${problem_name}.$(date +%m-%d-%H:%M:%S)
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  pad " · Deploying the Ansible files on workstation"
+  mkdir -p /home/student/${problem_name}/{templates,host_vars}
+  cat <<EOF > /home/student/${problem_name}/ansible.cfg
+[defaults]
+inventory=inventory
+remote_user=devops
+EOF
+  cat <<EOF > /home/student/${problem_name}/inventory
+[dhcp_servers]
+servera.lab.example.com
+EOF
+  cat <<EOF > /home/student/${problem_name}/host_vars/servera.lab.example.com
+---
+mac_if2: "${mac_secondary_a}"
+EOF
+  cat <<EOF > /home/student/${problem_name}/host_vars/serverb.lab.example.com
+---
+mac_if2: ${mac_secondary_b}
+EOF
+  cat <<EOF > /home/student/${problem_name}/host_vars/serverc.lab.example.com
+---
+mac_if2: ${mac_secondary_c}
+EOF
+  cat <<EOF > /home/student/${problem_name}/dhcp-server.yml
+---
+- name: Deploy a DHCPv6 server
+  hosts: servera.lab.example.com
+  become: true
+  vars:
+    # Configure an IPv6 address on servera
+    network_connections:
+      - name: "${connection_name}"
+        type: ethernet
+        mac: "{{ mac_if2 }}"
+        state: up
+        ip:
+          address:
+            - ${subnet}.1/24
+            - ${prefix_secondary}::a/64
+    # Define the variables expected by the templates/dhcpd6.conf.j2 template
+    IPv6_prefix: #FIXME
+    IPv6_#FIXME
+    ...#FIXME
+
+  roles:
+    - rhel-system-roles.network
+
+  tasks:
+    - name: the dhcp-server package is installed
+      #FIXME
+
+    - name: the DHCPv6 configuration file is deployed
+      #FIXME: deploy the templates/dhcpd6.conf.j2 template file
+      notify: reload dhcpd6
+
+    - name: the dhcpd6 service is started and enabled
+      #FIXME
+
+    - name: the dhcpv6 firewall service is opened
+      #FIXME
+
+  handlers:
+    - name: reload dhcpd6
+      service:
+        name: dhcpd6
+        state: restarted
+EOF
+  cat <<EOF > /home/student/${problem_name}/templates/dhcpd6.conf.j2
+authoritative;
+
+subnet6 {{ IPv6_prefix }} {
+  range6 {{ IPv6_start }} {{ IPv6_end }};
+  option dhcp6.name-servers {{ IPv6_ns }};
+  option dhcp6.domain-search "backend.lab.example.com";
+  default-lease-time 600;
+  max-lease-time 7200;
+}
+EOF
+  cat <<EOF  > /home/student/${problem_name}/parameters
+      prefix: ${prefix_secondary}::/64
+ range start: ${prefix_secondary}::20
+   range end: ${prefix_secondary}::60
+ name server: ${prefix_secondary}::d
+      domain: backend.lab.example.com
+EOF
+  chown -R student: /home/student/${problem_name}
+  print_SUCCESS
+
+
+  #
+  # Router: configuring the IPv6 layer
+  #
+
+
+  pad " · Setting the IPv6 address on ${router}"
+  interface=$(${ssh} ${router} 'nmcli --get-values GENERAL.HWADDR,GENERAL.DEVICE --escape no device show' | grep -i -A1 "${mac_secondary_router}" | tail -n 1)
+  if [ -z "${interface}" ]
+  then
+    print_FAIL
+  else
+    if ! ${ssh} ${router} "nmcli con add con-name ${problem_name} type ethernet ifname ${interface} ipv6.method manual ipv6.addresses ${IP_secondary_router}/64 && nmcli con up ${problem_name}"
+    then
+      print_FAIL
+    else
+      print_SUCCESS
+    fi
+  fi
+
+  pad " · Configuring IPv6 forwarding on ${router}"
+  if ${ssh} ${router} "sysctl -w net.ipv6.conf.all.forwarding=1"
+  then
+    ${ssh} ${router} "echo net.ipv6.conf.all.forwarding=1 > /etc/sysctl.d/${problem_name}.conf"
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+
+  #
+  # Router: installing and configuring dnsmasq to provide some IPv6 records
+  #
+
+
+  pad " · Installing dnsmasq and radvd on ${router}"
+  if ${ssh} ${router} "yum -y install dnsmasq radvd"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Configuring dnsmasq on ${router}"
+  cat <<EOF | ${ssh} ${router} "cat > /etc/dnsmasq.d/${problem_name}.conf"
+no-resolv
+server=172.25.250.254
+
+# IPv6 on the "private IPv6" network
+# Those definitions also create the backend.lab.example.com
+# domain in dnsmasq
+host-record=servera.backend.lab.example.com,${prefix_secondary}::a
+host-record=serverb.backend.lab.example.com,${prefix_secondary}::b
+host-record=serverc.backend.lab.example.com,${prefix_secondary}::c
+host-record=serverd.backend.lab.example.com,${prefix_secondary}::d
+EOF
+  print_SUCCESS
+
+  pad " · Configuring firewall ports on ${router}"
+  ${ssh} ${router} "firewall-cmd --add-service=dns ; firewall-cmd --add-service=dns --permanent"
+  print_SUCCESS
+
+  pad " · Starting and enabling dnsmasq on ${router}"
+  if ${ssh} ${router} "systemctl enable --now dnsmasq.service"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+
+  #
+  # Router: configuring radvd
+  #
+
+
+  pad " · Configuring radvd on ${router}"
+  interface=$(${ssh} ${router} 'nmcli --get-values GENERAL.HWADDR,GENERAL.DEVICE --escape no device show' | grep -i -A1 "${mac_secondary_router}" | tail -n 1)
+  if [ -z "${interface}" ]
+  then
+    print_FAIL
+  else
+    cat <<EOF | ${ssh} ${router} "cat > /etc/radvd.conf"
+interface ${interface}
+{
+  AdvSendAdvert on;
+  AdvManagedFlag on;
+  AdvOtherConfigFlag on;
+  MaxRtrAdvInterval 60;
+};
+EOF
+    print_SUCCESS
+  fi
+
+  pad " · Starting and enabling radvd on ${router}"
+  if ${ssh} ${router} "systemctl enable --now radvd.service"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+
+function lab_grade {
+
+  print_header "Grading the student's work on ${target_a}, ${target_b}, and ${target_c}:"
+  host_reachable ${target_a} ${target_b} ${target_c} ${target_d}
+
+
+  TMP_FILE=$(mktemp)
+
+  pad " · The ${connection_name} connection exists on ${target_a}"
+  ${ssh} ${target_a} "nmcli con show '${connection_name}'" > "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The ${connection_name} connection has the ${subnet}.1/24 address"
+  if grep -Fiq ${subnet}.1/24 "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The ${connection_name} connection is mapped to ${mac_secondary_a}"
+  INTERFACE=$(${ssh} ${target_a} "ip -br link show" | grep -Fi ${mac_secondary_a} | awk '{ print $1}')
+  ${ssh} ${target_a} "ip -br addr show dev ${INTERFACE}" | grep -Fiq ${subnet}.1/24
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The DHCP package is installed on ${target_a}"
+  if ${ssh} ${target_a} "rpm -q dhcp-server"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The DHCPv4 service is running on ${target_a}"
+  if ${ssh} ${target_a} "systemctl is-active dhcpd"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The DHCPv4 service is enabled on ${target_a}"
+  if ${ssh} ${target_a} "systemctl is-enabled dhcpd"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · DHCPv4 conf: authoritative"
+  ${ssh} ${target_a} cat /etc/dhcp/dhcpd.conf > "${TMP_FILE}"
+  grep -Eq "authoritative.*;" "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · DHCPv4 conf: ${subnet}.0/24"
+  grep -Eq "subnet[[:space:]]+${subnet}.*{" "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · DHCPv4 conf: ${subnet}.200 range start"
+  grep -Eq "range.*${subnet}.200.*;" "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · DHCPv4 conf: ${subnet}.254 range end"
+  grep -Eq "range.*${subnet}.254.*;" "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · DHCPv4 conf: name server (172.25.254.254)"
+  grep -Eq "domain-name-servers.*172.25.254.254.*;" "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · DHCPv4 conf: DNS search (example.net)"
+  grep -Eqi "domain-.*example.net.*;" "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · DHCPv4 conf: default lease time (600 seconds)"
+  grep -Eqi "lease.*600.*;" "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · DHCPv4 conf: max lease time (7200 seconds)"
+  grep -Eqi "lease.*7200.*;" "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · DHCPv4 conf: serverb allocation MAC (${mac_secondary_b})"
+  grep -Eqi "${mac_secondary_b}.*;" "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · DHCPv4 conf: serverb allocation IP (${subnet}.100)"
+  grep -Eqi "${subnet}.100.*;" "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · DHCPv4 conf: is valid"
+  if ${ssh} ${target_a} "dhcpd -t"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Firewall is configured for DHCPv4 on ${target_a}"
+  ${ssh} ${target_a} "firewall-cmd --list-all" | grep -wq -e dhcp -e 67
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The ${connection_name} connection exists on ${target_b}"
+  ${ssh} ${target_b} "nmcli con show '${connection_name}'" > "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The ${connection_name} connection is configured for DHCP on ${target_b}"
+  if grep -iq "ipv4.method:.*auto" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The ${connection_name} connection has the ${subnet}.100/24 address"
+  if grep -Fiq ${subnet}.100/24 "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The ${connection_name} connection is mapped to ${mac_secondary_b}"
+  INTERFACE=$(${ssh} ${target_b} "ip -br link show" | grep -Fi ${mac_secondary_b} | awk '{ print $1}')
+  ${ssh} ${target_b} "ip -br addr show dev ${INTERFACE}" | grep -Fiq ${subnet}.100/24
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The dhcp-server.yml playbook is valid on workstation"
+  su student -c "cd /home/student/dhcp-review && ansible-playbook --syntax-check dhcp-server.yml"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The dhcp-server.yml playbook runs from workstation"
+  ${ssh} ${target_c} "nmcli --wait 10 con down ${connection_name}"
+  ${ssh} ${target_a} "systemctl disable --now dhcpd6.service ;
+                      echo > /etc/dhcp/dhcpd6.conf ;
+                      echo > /var/lib/dhcpd/dhcpd6.leases ;
+                      echo > /var/lib/dhcpd/dhcpd6.leases~ ;
+                      firewall-cmd --remove-service=dhcpv6 ;
+                      firewall-cmd --remove-service=dhcpv6 --permanent"
+  su student -c "cd /home/student/dhcp-review && ansible-playbook dhcp-server.yml"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+
+  pad " · The DHCPv6 service is running on ${target_a}"
+  if ${ssh} ${target_a} "systemctl is-active dhcpd6.service"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The DHCPv6 service is enabled on ${target_a}"
+  if ${ssh} ${target_a} "systemctl is-enabled dhcpd6.service"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Firewall is configured for DHCPv6 on ${target_a}"
+  ${ssh} ${target_a} "firewall-cmd --list-all" | grep -q -e "dhcpv6[ $]" -e 547
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The ${connection_name} connection exists on ${target_c}"
+  ${ssh} ${target_c} "nmcli --wait 15 con up ${connection_name}"
+  sleep 10
+  ${ssh} ${target_c} "nmcli con show '${connection_name}'" > "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The ${connection_name} connection is configured for DHCPv4 on ${target_c}"
+  if grep -iq "ipv4.method:.*auto" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The ${connection_name} connection is configured for SLAAC on ${target_c}"
+  if grep -iq "ipv6.method:.*auto" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The ${connection_name} connection has an IPv4 between .200 and .254"
+  if grep -Fq ${subnet}.2 "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The ${connection_name} connection has an IPv6 in ${prefix_secondary}"
+  if grep -Fiq ${prefix_secondary} "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The ${connection_name} connection is mapped to ${mac_secondary_c}"
+  INTERFACE=$(${ssh} ${target_c} "ip -br link show" | grep -Fi ${mac_secondary_c} | awk '{ print $1}')
+  ${ssh} ${target_c} "ip -br addr show dev ${INTERFACE}" | grep -Fiq ${subnet}.2
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  rm -f "${TMP_FILE}"
+
+  # Overall grade
+  print_line
+  pad 'Overall lab grade'
+  if [[ ${fail_count} -eq 0 ]]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+
+function lab_finish {
+
+  print_header "Cleaning up the lab on ${target_a}, ${target_b}, ${target_c}, and ${target_d}:"
+  host_reachable ${target_a} ${target_b} ${target_c} ${target_d}
+
+  pad " · Removing the dnsmasq and radvd packages from ${router}"
+  ${ssh} ${router} 'yum remove -y dnsmasq radvd'
+  print_SUCCESS
+
+  pad " · Closing the firewall port on ${router}"
+  ${ssh} ${router} 'firewall-cmd --remove-service=dns --remove-service=dhcp --remove-service=dhcpv6 --permanent ; firewall-cmd --remove-service=dns --remove-service=dhcp --remove-service=dhcpv6'
+  print_SUCCESS
+
+  pad " · Cleaning up configuration files on ${router}"
+  ${ssh} ${router} "rm -rf /etc/sysctl.d/${problem_name}.conf /etc/dnsmasq* /var/lib/dnsmasq /etc/radvd.conf*"
+  print_SUCCESS
+
+  pad " · Removing the IPv6 address from ${router}"
+  ${ssh} ${router} "nmcli --wait 10 con down ${problem_name} ; nmcli --wait 10 con delete ${problem_name}"
+  print_SUCCESS
+
+  for target_mac in ${target_b},${mac_b} ${target_c},${mac_c} ${target_d},${mac_d} ${target_a},${mac_a}
+  do
+    target=${target_mac%%,*}
+    mac=${target_mac##*,}
+
+    # Removing all the connections except the connection associated with the
+    # first/main interface
+    pad " · Deactivating the secondary interfaces on ${target}"
+
+    # Retrieving all the interface names but skip lo and the main interface
+    for INTERFACE in $(${ssh} ${target} 'ip -brief link show' | awk -v MAC=${mac} 'BEGIN { IGNORECASE = 1;} $1 !~ /lo/ && $3 != MAC { print $1}')
+    do
+      # For all the NetworkManager connections associated with the interface,
+      # stop and delete the connection
+      for CON in $(${ssh} ${target} 'nmcli --get-values UUID connection show')
+      do
+        ${ssh} ${target} "nmcli --get-values connection.interface-name,GENERAL.DEVICES con show '${CON}'" | grep -wq "${INTERFACE}"
+        if [ $? -eq 0 ]
+        then
+          ${ssh} ${target} "nmcli --wait 10 con down '${CON}' ; nmcli --wait 10 con delete '${CON}'"
+        fi
+      done
+    done
+    print_SUCCESS
+
+    pad " · Restoring network configuration on ${target}"
+    ${ssh} ${target} "test -s /var/tmp/lab-${problem_name}.tgz && tar xf /var/tmp/lab-${problem_name}.tgz --xattrs -C / ; rm -f /var/tmp/lab-${problem_name}.tgz; nmcli --wait 0 con reload"
+    print_SUCCESS
+  done
+
+  pad " · Removing the dhcp-server and radvd packages from ${target_a}"
+  ${ssh} ${target_a} 'yum remove -y dhcp-server radvd'
+  print_SUCCESS
+
+  pad " · Closing the firewall port on ${target_a}"
+  ${ssh} ${target_a} 'firewall-cmd --remove-service=dhcp --remove-service=dhcpv6 --permanent ; firewall-cmd --remove-service=dhcp --remove-service=dhcpv6'
+  print_SUCCESS
+
+  pad " · Cleaning up DHCP configuration on ${target_a}"
+  ${ssh} ${target_a} 'rm -rf /etc/dhcp/dhcpd* /etc/sysconfig/dhcpd /var/lib/dhcpd'
+  print_SUCCESS
+
+  pad " · Removing the rhel-system-roles package from workstation"
+  yum remove -y rhel-system-roles
+  print_SUCCESS
+
+  # pad " · Cleaning up the sample Ansible configuration on workstation"
+  # rm -rf /home/student/${problem_name}
+  # print_SUCCESS
+
+  print_line
+  print_line 'Lab finished.'
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

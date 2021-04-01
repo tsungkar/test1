@@ -1,0 +1,101 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-web-basic - start/finish script for RH358
+#
+# SYNOPSIS
+#     lab-web-basic {start|finish}
+#
+# DESCRIPTION
+#     This script performs the start/finish steps for the basic httpd setup
+#     RH358-Configure a basic web server using Apache
+#
+# CHANGELOG
+#   * Fri Apr 24 2020 Dallas Spohn <dspohn@redhat.com>
+#   - original code
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin
+
+# Initialize and set some variables
+run_as_root='true'
+target='servera'
+reqd_package1='httpd'
+reqd_manual='httpd-manual'
+http_target='servera.lab.example.com'
+
+declare -a valid_commands=(start finish)
+
+
+function lab_start {
+  # Make sure httpd is not installed
+  print_header "Setting up ${target} for lab exercise work:"
+  host_reachable ${target}
+  pad " · Ensuring ${reqd_package1} package is removed:"
+  if ${ssh} ${target} "rpm -q ${reqd_package1}"
+  then
+    if ${ssh} ${target} "yum remove -y ${reqd_package1} ${reqd_manual}"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    print_SUCCESS
+  fi
+
+  # Make sure http service is removed from firewall
+  pad " · Ensuring http service is removed from firewall:"
+  ${ssh} ${target} "firewall-cmd --permanent --remove-service=http"
+  ${ssh} ${target} "firewall-cmd --reload"
+  print_SUCCESS
+
+  print_line
+}
+
+function lab_finish {
+
+  # Make sure httpd is not installed
+  pad " · Ensuring ${reqd_package1} is removed:"
+  if ${ssh} ${target} "rpm -q ${reqd_package1}"
+  then
+    if ${ssh} ${target} "yum remove -y ${reqd_package1} ${reqd_manual}"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    print_SUCCESS
+  fi
+
+
+  # Remove directories created with the exercise. /var/www/html/index.html
+  pad " · Removing document root files:"
+  ${ssh} ${target} "rm -rf /var/www/html/index.html"
+  print_SUCCESS
+
+  # Remove directories created with the exercise.
+  pad " · Removing the httpd directory:"
+  ${ssh} ${target} "rm -rf /etc/httpd/"
+  print_SUCCESS
+
+  # Make sure http service is removed from firewall
+  pad " · Ensuring http service is removed from firewall:"
+  ${ssh} ${target} "firewall-cmd --permanent --remove-service=http"
+  ${ssh} ${target} "firewall-cmd --reload"
+  print_SUCCESS
+
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"
+

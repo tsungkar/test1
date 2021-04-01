@@ -1,0 +1,48 @@
+- name: Create the document root for each web site
+  file:
+    path: "/srv/www/{{ item }}"
+    state: directory
+    owner: root
+    mode: '0755'
+  loop: "{{ web_hosts }}"
+
+- name: Deploy the default index.html
+  template:
+    src: "sample-index.html.j2"
+    dest: "/srv/www/{{ item }}/index.html"
+  loop: "{{ web_hosts }}"
+
+- name: Assign the SELinux policy for the document roots
+  sefcontext:
+    target: '/srv/www(/.*)?'
+    setype: httpd_sys_content_t
+    state: present
+
+- name: Change the SELinux file contexts
+  file:
+    path: /srv/www
+    state: directory
+    recurse: yes
+    follow: no
+    setype: _default
+
+- name: Install the TLS certs of the virtual hosts
+  copy:
+    src: "{{ item }}.crt"
+    dest: "/etc/pki/tls/certs"
+  loop: "{{ web_hosts }}"
+
+- name: Install the TLS private keys of the virtual hosts
+  copy:
+    src: "{{ item }}.key"
+    dest: "/etc/pki/tls/private"
+    mode: '0600'
+    owner: root
+    group: root
+  loop: "{{ web_hosts }}"
+
+- name: Install the example.com CA cert
+  copy:
+    src: "{{ cacert_file }}"
+    dest: "/etc/pki/tls/certs/{{ cacert_file }}"
+

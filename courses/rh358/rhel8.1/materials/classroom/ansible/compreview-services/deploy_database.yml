@@ -1,0 +1,13 @@
+---
+- name: Cleanup Database
+  import_playbook: cleanup_database.yml
+
+- name: Install required packages to manages hosts
+  hosts: db_servers
+  become: yes
+
+  tasks:
+    - name: Install required packages
+      yum:
+        name: python3-PyMySQL
+        state: present

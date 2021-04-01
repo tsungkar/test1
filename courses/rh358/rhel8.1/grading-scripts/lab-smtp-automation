@@ -1,0 +1,140 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-smtp-automation - grading script for RH358 Automating Postfix
+#                           Configuration guided exercise.
+#
+# SYNOPSIS
+#     lab-smtp-automation {start|finish}
+#
+#        start   - prepare the system for starting the lab
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start,
+#     or finish for the RH358 Automating Postfix Configuration guided
+#     exercise.
+#
+# CHANGELOG
+#   * Thu Jul 02 2020 George Hacker <ghacker@redhat.com>
+#   - Call rhel_config_ansible() to download student project files
+#   * Thu May 28 2020 George Hacker <ghacker@redhat.com>
+#   - original code
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+
+ansible_host='workstation'
+null_clients='servera serverb serverc serverd'
+relay_server='bastion'
+
+ge_playbook_dir='classroom/ansible'
+ge_playbook_tar="${problem_name}.tar"
+ge_playbook_start="${problem_name}-start.yml"
+ge_playbook_finish="${problem_name}-finish.yml"
+tmp_dir="/tmp/${problem_name}"
+
+ansible_proj_dir='/home/student/smtp-auto'
+
+declare -a valid_commands=(start finish)
+
+function lab_start {
+
+  print_header "Starting ${problem_name} exercise."
+
+  host_reachable ${null_clients} ${relay_server}
+
+  pad " · Installing the rhel-system-roles package on workstation"
+  if yum install -y rhel-system-roles
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  # Download student project files
+  rhel_config_ansible ${ansible_proj_dir}
+
+  # Create /tmp/problem_name directory and cd there
+  rm -rf ${tmp_dir} ; mkdir -p ${tmp_dir}
+  if ! cd ${tmp_dir}
+  then
+    pad ' · Error: unable to create staging directory'
+    print_FAIL
+    exit 1
+  fi
+
+  # Download GE start playbook
+  pad ' · Download exercise playbooks'
+  cmd1="curl -O http://materials.example.com/${ge_playbook_dir}/${ge_playbook_tar}"
+  cmd2="tar xf ${ge_playbook_tar} -C /tmp"
+  if ${cmd1} && ${cmd2}
+  then
+    rm -f ${ge_playbook_tar}
+    print_SUCCESS
+    # Run GE start playbook
+    pad ' · Run exercise preparation playbook'
+    if ansible-playbook ${ge_playbook_start} & spinner $! 3
+    then
+      cd
+      rm -rf ${tmp_dir}
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+function lab_finish {
+
+  print_header "Finishing ${problem_name} exercise."
+
+  host_reachable ${null_clients} ${relay_server}
+
+  # Create /tmp/problem_name directory and cd there
+  rm -rf ${tmp_dir} ; mkdir -p ${tmp_dir}
+  if ! cd ${tmp_dir}
+  then
+    pad ' · Error: unable to create staging directory'
+    print_FAIL
+    exit 1
+  fi
+
+  # Download GE finish playbook
+  pad ' · Download exercise playbooks'
+  cmd1="curl -O http://materials.example.com/${ge_playbook_dir}/${ge_playbook_tar}"
+  cmd2="tar xf ${ge_playbook_tar} -C /tmp"
+  if ${cmd1} && ${cmd2}
+  then
+    rm -f ${ge_playbook_tar}
+    print_SUCCESS
+    # Run GE finish playbook
+    pad ' · Run exercise cleanup playbook'
+    if ansible-playbook ${ge_playbook_finish} & spinner $! 3
+    then
+      cd
+      rm -rf ${tmp_dir}
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

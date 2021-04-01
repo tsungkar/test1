@@ -1,0 +1,370 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-servicemgmt-review - grading script for RH358:Managing Network
+#                              Services Lab
+# SYNOPSIS
+#     lab-servicemgmt-review {start|grade|finish}
+#
+#        start   - prepare the system for starting the lab
+#        grade   - perform evaluation steps on the system
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start, grading,
+#     or finish for the particular RH358:Managing Network Services Lab.
+#
+# CHANGELOG
+#   * Tue Jun 09 2020 George Hacker <ghacker@redhat.com>
+#   - preserve the student's Ansible project directory
+#   * Wed Mar 19 2020 Victor Costea <vcostea@redhat.com>
+#   - add GHacker code to recognize network interfaces
+#   * Wed Mar 11 2020 Victor Costea <vcostea@redhat.com>
+#   - original code
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+host='servera'
+gateway='serverd'
+iface_number='2'
+gateway_IP4='192.168.0.254/24'
+
+targetw='workstation'
+targetb='serverb'
+targetc='serverc'
+student_home_dir='/home/student'
+#labname='servicemgmt-review'
+lab_dir="${student_home_dir}/${problem_name}"
+lab_cfg="${problem_name}/ansible.cfg"
+lab_inv="${problem_name}/inventory"
+conn_name='lab_conn'
+
+declare -a valid_commands=(start grade finish)
+
+
+function lab_start {
+
+  print_header 'Starting servicemgmt-review lab.'
+
+  print_line "Preparing ${host} and ${gateway} for lab exercise work:"
+  print_line
+  host_reachable ${host}
+  host_reachable ${gateway}
+
+  rhel_install_ansible
+
+  pad " · Create exercise directory"
+  if ! [ -d "${lab_dir}" ]; then
+    mkdir -p ${lab_dir}
+    chown -R student.student ${lab_dir}
+    print_SUCCESS
+  elif [ -d "${lab_dir}" ]; then
+      print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Download Ansible configuration"
+  cmd1="curl http://materials.example.com/labs/${lab_cfg} > ${lab_cfg}"
+  if su - student -c "${cmd1}"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Download Ansible inventory"
+  cmd1="curl http://materials.example.com/labs/${lab_inv} > ${lab_inv}"
+  if su - student -c "${cmd1}"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Ensure that rsyslog.service is disabled on ${host}"
+  if ! ${ssh} ${host} "systemctl disable rsyslog.service"
+  then
+    print_FAIL
+  else
+    print_SUCCESS
+  fi
+
+  pad " · Ensure that rsyslog.service stopped on ${host}"
+  if ! ${ssh} ${host} "systemctl stop rsyslog.service"
+  then
+    print_FAIL
+  else
+    print_SUCCESS
+  fi
+
+  # Prepare the networking part of the lab
+  # Get interface nicnames
+  if ! iface_gw=$(rhel_get_nicname ${gateway} ${iface_number}); then
+    pad " · Error: unable to get gateway interface name - ${gateway}"
+    print_FAIL
+    exit 1
+  fi
+  if ! iface_host=$(rhel_get_nicname ${host} ${iface_number}); then
+    pad " · Error: unable to get host interface name - ${host}"
+    print_FAIL
+    exit 1
+  fi
+
+  # Configure gateway machine
+  if ! ${ssh} ${gateway} "nmcli con show id '${iface_gw}'"; then
+    pad " · Configuring ${gateway} as an IPv4 gateway"
+    cmd1="nmcli con add con-name '${iface_gw}' type ethernet ifname ${iface_gw}"
+    cmd2="nmcli con mod '${iface_gw}' ipv4.addresses '${gateway_IP4}'"
+    cmd3="nmcli con mod '${iface_gw}' ipv4.method manual"
+    cmd4="nmcli con up '${iface_gw}'"
+    if ${ssh} ${gateway} "${cmd1} && ${cmd2} && ${cmd3} && ${cmd4}"; then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    pad " · Warning: network device already configured on ${gateway}"
+    print_SUCCESS
+  fi
+
+  # Ensure Lab NM connection is removed on host machine
+  if ${ssh} ${host} "nmcli con show id '${iface_host}'"; then
+    pad " · Unconfiguring network interface on ${host}"
+    if ${ssh} ${host} "nmcli con delete id '${iface_host}'"; then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  print_line
+}
+
+function lab_grade {
+
+  print_header "Grading the student's work on ${host}:"
+  host_reachable ${host}
+
+  # Check that rsyslog is enabled
+  # Currently, this check will always pass after "finish" but fail after "start"
+  pad ' · Checking rsyslog service is enabled'
+  if ${ssh} ${host} "systemctl is-enabled rsyslog.service"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # Check that rsyslog is running
+  # Currently, this check will always pass after "finish" but fail after "start"
+  pad ' · Checking rsyslog service is running'
+  if ${ssh} ${host} "systemctl is-active rsyslog.service"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # Get network interface names for servers a-d
+  if ! iface_gw=$(rhel_get_nicname ${gateway} ${iface_number}); then
+    pad " · Error: unable to get gateway interface name - ${gateway}"
+    print_FAIL
+    exit 1
+  fi
+
+  if ! iface_host=$(rhel_get_nicname ${host} ${iface_number}); then
+    pad " · Error: unable to get host interface name - ${host}"
+    print_FAIL
+    exit 1
+  fi
+
+  if ! iface_hostb=$(rhel_get_nicname ${targetb} ${iface_number}); then
+    pad " · Error: unable to get host interface name - ${targetb}"
+    print_FAIL
+    exit 1
+  fi
+
+  if ! iface_hostc=$(rhel_get_nicname ${targetc} ${iface_number}); then
+    pad " · Error: unable to get host interface name - ${targetc}"
+    print_FAIL
+    exit 1
+  fi
+
+  # Check connection on servera
+  pad " · Checking NM connection name on ${host}"
+  if ${ssh} ${host} "nmcli con show id '${conn_name}'"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # Check IP address on servera
+  pad " · Checking IP address on ${host}"
+  if ${ssh} ${host} "nmcli con show '${conn_name}' | grep ipv4.addresses | grep '192.168.0.1'"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # Check connection on serverb
+  pad " · Checking NM connection name on ${targetb}"
+  if ${ssh} ${targetb} "nmcli con show id '${conn_name}'"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # Check IP address on serverb
+  pad " · Checking IP address on ${targetb}"
+  if ${ssh} ${targetb} "nmcli con show '${conn_name}' | grep ipv4.addresses | grep '192.168.0.11'"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # Check connection on serverc
+  pad " · Checking NM connection name on ${targetc}"
+  if ${ssh} ${targetc} "nmcli con show id '${conn_name}'"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # Check IP address on serverb
+  pad " · Checking IP address on ${targetc}"
+  if ${ssh} ${targetc} "nmcli con show '${conn_name}' | grep ipv4.addresses | grep '192.168.0.12'"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # Overall grade
+  print_line
+  pad 'Overall lab grade'
+  if [[ ${fail_count} -eq 0 ]]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+function lab_finish {
+
+  print_header "Finishing ${problem_name} lab."
+
+  host_reachable ${host} ${gateway}
+
+  # Cleanup networking part of the lab
+  # Get network interface nicnames on gateway machine
+  if ! iface_gw=$(rhel_get_nicname ${gateway} ${iface_number}); then
+    pad " · Error: unable to get gateway interface name - ${gateway}"
+    print_FAIL
+    exit 1
+  fi
+  if ! iface_host=$(rhel_get_nicname ${host} ${iface_number}); then
+    pad " · Error: unable to get host interface name - ${host}"
+    print_FAIL
+    exit 1
+  fi
+
+  if ! iface_hostb=$(rhel_get_nicname ${targetb} ${iface_number}); then
+    pad " · Error: unable to get host interface name - ${targetb}"
+    print_FAIL
+    exit 1
+  fi
+
+  # Same as above for serverc
+  if ! iface_hostc=$(rhel_get_nicname ${targetc} ${iface_number}); then
+    pad " · Error: unable to get host interface name - ${targetc}"
+    print_FAIL
+    exit 1
+  fi
+
+  # Remove gateway from gateway machine
+  if ${ssh} ${gateway} "nmcli con show id '${iface_gw}'"; then
+    pad " · Unconfiguring ${gateway} as an IPv4 gateway"
+    if ${ssh} ${gateway} "nmcli con delete id '${iface_gw}'"; then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    pad " · Warning: network device not configured on ${gateway}"
+    print_SUCCESS
+  fi
+
+  # Remove Lab NM connection from host machine
+  if ${ssh} ${host} "nmcli con show id '${conn_name}'"; then
+    pad " · Unconfiguring network interface on ${host}"
+    if ${ssh} ${host} "nmcli con delete id '${conn_name}'"; then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    pad " · Warning: network device not configured on ${host}"
+    print_SUCCESS
+  fi
+
+  # Remove Lab NM connection from serverb machine
+  if ${ssh} ${targetb} "nmcli con show id '${conn_name}'"; then
+    pad " · Unconfiguring network interface on ${targetb}"
+    if ${ssh} ${targetb} "nmcli con delete id '${conn_name}'"; then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    pad " · Warning: network device not configured on ${targetb}"
+    print_SUCCESS
+  fi
+
+  # Remove Lab NM connection from serverc machine
+  if ${ssh} ${targetc} "nmcli con show id '${conn_name}'"; then
+    pad " · Unconfiguring network interface on ${targetc}"
+    if ${ssh} ${targetc} "nmcli con delete id '${conn_name}'"; then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    pad " · Warning: network device not configured on ${targetc}"
+    print_SUCCESS
+  fi
+
+  # Ensure that rsyslog is enabled and and started
+  pad " · Start and enable rsyslog.service on ${host}"
+  if ${ssh} ${host} "systemctl enable --now rsyslog.service"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  print_line
+  print_line 'Lab finished.'
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

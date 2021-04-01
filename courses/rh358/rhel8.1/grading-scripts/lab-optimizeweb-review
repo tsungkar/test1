@@ -1,0 +1,802 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     optimizeweb-review - grading script for RH358 Optimizing Web Server
+#                          Traffic lab
+#
+# SYNOPSIS
+#     optimizeweb-review {start|grade|finish}
+#
+#        start   - prepare the system for starting the lab
+#        grade   - perform evaluation steps on the system
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start, grading,
+#     or finish for the Optimizing Web Server Traffic lab.
+#
+# CHANGELOG
+#   * Thu Apr 23 2020 Herve Quatremain <hquatrem@redhat.com>
+#   - original code
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+target_a='servera'
+target_b='serverb'
+target_c='serverc'
+
+
+# This defines which subcommands are supported (start, grade, etc.).
+# Corresponding lab_COMMAND functions must be defined.
+declare -a valid_commands=(start grade finish)
+
+
+function lab_start {
+
+  print_header 'Starting lab.'
+
+  print_line "Preparing ${target_a}, ${target_b}, and ${target_c} for lab exercise work:"
+  print_line
+  host_reachable ${target_a} ${target_b} ${target_c}
+
+  pad " · Installing the httpd and php packages on ${target_c}"
+  if ${ssh} ${target_c} 'yum install -y httpd php'
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Deploying some web content on ${target_c}"
+  ${ssh} ${target_c} "echo 'This is ${target_c}' > /var/www/html/index.html"
+  cat <<'EOF' | ${ssh} ${target_c} "cat > /var/www/html/get-request.php"
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>Request Details</title>
+  </head>
+  <body>
+
+<?php
+echo "The request is coming from " . $_SERVER["REMOTE_ADDR"] . " <br>\n";
+
+if(array_key_exists("HTTP_X_FORWARDED_FOR", $_SERVER)) {
+	echo "The HTTP_X_FORWARDED_FOR header is set to " . $_SERVER["HTTP_X_FORWARDED_FOR"] . " <br>\n";
+}
+else {
+	echo "The HTTP_X_FORWARDED_FOR header is not set. <br>\n";
+}
+
+if(array_key_exists("HTTP_X_FORWARDED_PROTO", $_SERVER)) {
+	echo "The HTTP_X_FORWARDED_PROTO header is set to " . $_SERVER["HTTP_X_FORWARDED_PROTO"] . " <br>\n";
+}
+else {
+	echo "The HTTP_X_FORWARDED_PROTO header is not set. <br>\n";
+}
+?>
+
+  </body>
+</html>
+EOF
+  cat <<'EOF' | ${ssh} ${target_c} "cat > /var/www/html/set-cookie.php"
+<!DOCTYPE html>
+<?php
+$cookie_name = "SESSIONID";
+$cookie_value = "123456789";
+// The cookie expires in 30 days (1 day = 86400 seconds)
+setcookie($cookie_name, $cookie_value, time() + (86400 * 30), "/");
+?>
+<html lang="en">
+  <head>
+    <title>Set a Cookie</title>
+  </head>
+  <body>
+<?php
+if(array_key_exists($cookie_name, $_COOKIE)) {
+	echo "The $cookie_name cookie is set to " . $_COOKIE[$cookie_name] . " <br>\n";
+}
+?>
+  </body>
+</html>
+EOF
+  cat <<'EOF' | ${ssh} ${target_c} "cat > /var/www/html/set-cache.php"
+<!DOCTYPE html>
+<?php
+header("Cache-Control: max-age=180" ); // 3 minutes
+?>
+<html lang="en">
+  <head>
+    <title>Set Cache Expiration</title>
+  </head>
+  <body>
+    Cached for three minutes.
+  </body>
+</html>
+EOF
+  print_SUCCESS
+
+  pad " · Configuring firewall ports on ${target_c}"
+  ${ssh} ${target_c} "firewall-cmd --add-service=http ; firewall-cmd --add-service=http --permanent"
+  print_SUCCESS
+
+  pad " · Starting and enabling httpd on ${target_c}"
+  if ${ssh} ${target_c} "systemctl enable --now httpd.service"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  if [ -e "/home/student/${problem_name}" ]
+  then
+    pad " · Saving existing ~/${problem_name}"
+    if mv /home/student/${problem_name} /home/student/${problem_name}.$(date +%m-%d-%H:%M:%S)
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  rhel_install_ansible
+
+  pad " · Deploying the Ansible files on workstation"
+  mkdir -p /home/student/${problem_name}/files
+  cat <<'EOF' > /home/student/${problem_name}/ansible.cfg
+[defaults]
+inventory=inventory
+remote_user=devops
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/files/default.vcl
+#
+# This is an example VCL file for Varnish.
+#
+# It does not do anything by default, delegating control to the
+# builtin VCL. The builtin VCL is called when there is no explicit
+# return statement.
+#
+# See the VCL chapters in the Users Guide at https://www.varnish-cache.org/docs/
+# and https://www.varnish-cache.org/trac/wiki/VCLExamples for more examples.
+
+# Marker to tell the VCL compiler that this VCL has been adapted to the
+# new 4.0 format.
+vcl 4.0;
+
+# Default backend definition. Set this to point to your content server.
+backend default {
+    .host = "127.0.0.1";
+    .port = "8080";
+}
+
+sub vcl_recv {
+    # Happens before we check if we have this in cache already.
+    #
+    # Typically you clean up the request here, removing cookies you don't need,
+    # rewriting the request, etc.
+}
+
+sub vcl_backend_response {
+    # Happens after we have read the response headers from the backend.
+    #
+    # Here you clean the response headers, removing silly Set-Cookie headers
+    # and other mistakes your backend does.
+}
+
+sub vcl_deliver {
+    # Happens when we have all the pieces we need, and are about to send the
+    # response to the client.
+    #
+    # You can do accounting or modifying the final object here.
+}
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/files/haproxy.cfg
+#---------------------------------------------------------------------
+# Example configuration for a possible web application.  See the
+# full configuration options online.
+#
+#   https://www.haproxy.org/download/1.8/doc/configuration.txt
+#
+#---------------------------------------------------------------------
+
+#---------------------------------------------------------------------
+# Global settings
+#---------------------------------------------------------------------
+global
+    # to have these messages end up in /var/log/haproxy.log you will
+    # need to:
+    #
+    # 1) configure syslog to accept network log events.  This is done
+    #    by adding the '-r' option to the SYSLOGD_OPTIONS in
+    #    /etc/sysconfig/syslog
+    #
+    # 2) configure local2 events to go to the /var/log/haproxy.log
+    #   file. A line like the following can be added to
+    #   /etc/sysconfig/syslog
+    #
+    #    local2.*                       /var/log/haproxy.log
+    #
+    log         127.0.0.1 local2
+
+    chroot      /var/lib/haproxy
+    pidfile     /var/run/haproxy.pid
+    maxconn     4000
+    user        haproxy
+    group       haproxy
+    daemon
+
+    # turn on stats unix socket
+    stats socket /var/lib/haproxy/stats
+
+    # utilize system-wide crypto-policies
+    ssl-default-bind-ciphers PROFILE=SYSTEM
+    ssl-default-server-ciphers PROFILE=SYSTEM
+
+#---------------------------------------------------------------------
+# common defaults that all the 'listen' and 'backend' sections will
+# use if not designated in their block
+#---------------------------------------------------------------------
+defaults
+    mode                    http
+    log                     global
+    option                  httplog
+    option                  dontlognull
+    option http-server-close
+    option forwardfor       except 127.0.0.0/8
+    option                  redispatch
+    retries                 3
+    timeout http-request    10s
+    timeout queue           1m
+    timeout connect         10s
+    timeout client          1m
+    timeout server          1m
+    timeout http-keep-alive 10s
+    timeout check           10s
+    maxconn                 3000
+
+#---------------------------------------------------------------------
+# main frontend which proxys to the backends
+#---------------------------------------------------------------------
+frontend main
+    bind *:5000
+    acl url_static       path_beg       -i /static /images /javascript /stylesheets
+    acl url_static       path_end       -i .jpg .gif .png .css .js
+
+    use_backend static          if url_static
+    default_backend             app
+
+#---------------------------------------------------------------------
+# static backend for serving up images, stylesheets and such
+#---------------------------------------------------------------------
+backend static
+    balance     roundrobin
+    server      static 127.0.0.1:4331 check
+
+#---------------------------------------------------------------------
+# round robin balancing between the various backends
+#---------------------------------------------------------------------
+backend app
+    balance     roundrobin
+    server  app1 127.0.0.1:5001 check
+    server  app2 127.0.0.1:5002 check
+    server  app3 127.0.0.1:5003 check
+    server  app4 127.0.0.1:5004 check
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/site.yml
+---
+- name: Deploy HAProxy
+  import_playbook: deploy_haproxy.yml
+
+- name: Deploy Varnish
+  import_playbook: deploy_varnish.yml
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/inventory
+[lb_servers]
+servera.lab.example.com
+
+[cache_servers]
+serverb.lab.example.com
+
+[web_servers]
+serverc.lab.example.com
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/deploy_haproxy.yml
+---
+- name: Ensure HAProxy is deployed
+  hosts: servera.lab.example.com
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: the haproxy package is installed
+      yum:
+        name: haproxy
+        state: present
+
+    - name: the /etc/pki/haproxy directory exists
+      file:
+        path: /etc/pki/haproxy
+        state: directory
+        owner: root
+        mode: '700'
+
+    - name: the SSL file for HTTPS termination is deployed
+      copy:
+        # You need to create that file from the
+        # servera.lab.example.com.{crt,key} files under the
+        # files/ directory
+        src: files/haproxy.pem
+        dest: /etc/pki/haproxy/haproxy.pem
+      notify: restart haproxy
+
+    - name: the HAProxy configuration file is deployed
+      copy:
+        # You need to complete that configuration file
+        src: files/haproxy.cfg
+        dest: /etc/haproxy/haproxy.cfg
+      notify: restart haproxy
+
+    - name: the haproxy service is started and enabled
+      service:
+        name: haproxy
+        state: started
+        enabled: yes
+
+    - name: the http and https firewall services are opened
+      firewalld:
+        service: "{{ item }}"
+        state: enabled
+        immediate: yes
+        permanent: yes
+      loop:
+        - http
+        - https
+
+  handlers:
+    - name: restart haproxy
+      service:
+        name: haproxy
+        state: restarted
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/deploy_varnish.yml
+---
+- name: Ensure Varnish is deployed
+  hosts: serverb.lab.example.com
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: the varnish package is installed
+      yum:
+        name: varnish
+        state: present
+
+    - name: the systemd drop-in directory exists
+      file:
+        path: /etc/systemd/system/varnish.service.d
+        state: directory
+
+    - name: the varnish systemd service configuration file is deployed
+      copy:
+        # You need to create that configuration file
+        src: files/port.conf
+        dest: /etc/systemd/system/varnish.service.d/port.conf
+      notify:
+        - reload systemd
+        - restart varnish
+
+    - name: the Varnish configuration file is deployed
+      copy:
+        # You need to complete that configuration file
+        src: files/default.vcl
+        dest: /etc/varnish/default.vcl
+      notify: restart varnish
+
+    - name: the varnish service is started and enabled
+      service:
+        name: varnish
+        state: started
+        enabled: yes
+
+    - name: the port 9000 is opened in the firewall
+      firewalld:
+        port: 9000/tcp
+        state: enabled
+        immediate: yes
+        permanent: yes
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart varnish
+      service:
+        name: varnish
+        state: restarted
+EOF
+  print_SUCCESS
+
+  pad " · Installing the socat package on ${target_a}"
+  if ${ssh} ${target_a} 'yum install -y socat'
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Creating an SSL certificate for ${target_a}"
+  rhel_certs_create ${target_a}.lab.example.com
+  if [ $? -eq 0 ]
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Copying the certificate to ${target_a}"
+  if ${ssh} ${target_a} "mkdir -p /root/${problem_name}"
+  then
+    cat /etc/pki/CA/certs/servera.lab.example.com.crt | ${ssh} ${target_a} "cat > /root/${problem_name}/servera.lab.example.com.crt"
+    cat /etc/pki/CA/private/servera.lab.example.com.key | ${ssh} ${target_a} "cat > /root/${problem_name}/servera.lab.example.com.key"
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Copying the certificates to ~/${problem_name}"
+  cp /etc/pki/CA/certs/servera.lab.example.com.crt /etc/pki/CA/private/servera.lab.example.com.key /home/student/${problem_name}/files
+  cp /etc/pki/CA/cacert.pem /home/student/${problem_name}
+  chown -R student: /home/student/${problem_name}
+  print_SUCCESS
+
+  print_line
+}
+
+
+function lab_grade {
+
+  print_header "Grading the student's work on ${target_a}, ${target_b}, and ${target_c}:"
+  host_reachable ${target_a} ${target_b} ${target_c}
+
+
+  TMP_FILE=$(mktemp)
+
+  pad " · The varnish package is installed on ${target_b}"
+  if ${ssh} ${target_b} "rpm -q varnish"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+  # Start (or purge) Varnish so the script can test the responses
+  ${ssh} ${target_b} "systemctl restart varnish"
+
+  pad " · The varnish service is running on ${target_b}"
+  if ${ssh} ${target_b} "systemctl is-active varnish"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The varnish service is enabled on ${target_b}"
+  if ${ssh} ${target_b} "systemctl is-enabled varnish"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Firewall port 9000 is opened on ${target_b}"
+  ${ssh} ${target_b} "firewall-cmd --list-all" | grep -wq 9000
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Varnish is listening on port 9000 on ${target_b}"
+  ${ssh} ${target_b} "ps -C varnishd -o args" > "${TMP_FILE}"
+  if grep -q -- "-a.*:9000" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Varnish is using HTTP PROXY protocol on port 9000"
+  if grep -q -- "-a.*:9000,PROXY" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Varnish is listening on port 80 on ${target_b}"
+  if grep -q -- "-a.*:80" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Varnish back-end is serverc"
+  ${ssh} ${target_b} "curl http://127.0.0.1/" | grep -Fiq serverc
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Varnish PURGE requests are allowed from localhost"
+  ${ssh} ${target_b} "curl -X PURGE http://127.0.0.1/" | grep -Fiq "200 Purged"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Varnish TTL is two days on ${target_b}"
+  ${ssh} ${target_b} cat /etc/varnish/default.vcl > "${TMP_FILE}"
+  if grep -qE "set[[:space:]]+beresp.ttl[[:space:]]*=[[:space:]]*48[[:space:]]*h[[:space:]]*;" "${TMP_FILE}"
+  then
+    print_PASS
+  elif grep -qE "set[[:space:]]+beresp.ttl[[:space:]]*=[[:space:]]*2[[:space:]]*d[[:space:]]*;" "${TMP_FILE}"
+  then
+    print_PASS
+  elif grep -qE "set[[:space:]]+beresp.ttl[[:space:]]*=[[:space:]]*2880[[:space:]]*m[[:space:]]*;" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+
+  pad " · The haproxy package is installed on ${target_a}"
+  if ${ssh} ${target_a} "rpm -q haproxy"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+  # Start HAProxy so the UNIX stat socket is up
+  ${ssh} ${target_a} "systemctl start haproxy"
+
+  pad " · The haproxy service is running on ${target_a}"
+  if ${ssh} ${target_a} "systemctl is-active haproxy"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The haproxy service is enabled on ${target_a}"
+  if ${ssh} ${target_a} "systemctl is-enabled haproxy"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Firewall http service is opened on ${target_a}"
+  ${ssh} ${target_a} "firewall-cmd --list-all" | grep -wq -e http -e 80
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Firewall https service is opened on ${target_a}"
+  ${ssh} ${target_a} "firewall-cmd --list-all" | grep -wq -e https -e 443
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · HAProxy back-end name is lab on ${target_a}"
+  sleep 5
+  ${ssh} ${target_a} "echo 'show stat' | socat /var/lib/haproxy/stats stdio" > "${TMP_FILE}"
+  if grep -qi "^lab,BACKEND," "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # pad " · HAProxy back-end mode is http on ${target_a}"
+  # if grep -qi "^lab,BACKEND,.*,http," "${TMP_FILE}"
+  # then
+  #   print_PASS
+  # else
+  #   print_FAIL
+  # fi
+
+  pad " · HAProxy back-end algorithm is roundrobin on ${target_a}"
+  if grep -qi "^lab,BACKEND,.*,roundrobin," "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · HAProxy back-end server is ${target_b} on ${target_a}"
+  if grep -qi "^lab,${target_b}" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · HAProxy back-end IP is 172.25.250.11:9000 on ${target_a}"
+  if grep -qi "^lab,.*,172.25.250.11:9000," "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · HAProxy back-end configured for HTTP PROXY on ${target_a}"
+  ${ssh} ${target_a} "cat /etc/haproxy/haproxy.cfg" | grep -Fq send-proxy-v2
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · HAProxy front-end name is web on ${target_a}"
+  if grep -qi "^web,FRONTEND," "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # pad " · HAProxy front-end mode is http on ${target_a}"
+  # if grep -qi "^web,FRONTEND,.*,http," "${TMP_FILE}"
+  # then
+  #   print_PASS
+  # else
+  #   print_FAIL
+  # fi
+
+  pad " · HAProxy is responding on port 80 on ${target_a}"
+  curl -I http://${target_a}/ > "${TMP_FILE}"
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · HAProxy is redirecting port 80 to 443 on ${target_a}"
+  if grep -qi "location:.*https://${target_a}" "${TMP_FILE}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · HAProxy is responding on port 443 on ${target_a}"
+  if curl -k https://${target_a}/
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · HAProxy is terminating HTTPS with ${target_a} certificate"
+  if curl --cacert /home/student/${problem_name}/cacert.pem https://${target_a}.lab.example.com/
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+
+  rm -f "${TMP_FILE}"
+
+  # Overall grade
+  print_line
+  pad 'Overall lab grade'
+  if [[ ${fail_count} -eq 0 ]]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+
+function lab_finish {
+
+  print_header "Cleaning up the lab on ${target_a}, ${target_b}, and ${target_c}:"
+  host_reachable ${target_a} ${target_b} ${target_c}
+
+  pad " · Removing the haproxy and socat packages from ${target_a}"
+  ${ssh} ${target_a} 'yum remove -y haproxy varnish-docs socat'
+  print_SUCCESS
+
+  pad " · Resetting SELinux Boolean on ${target_a}"
+  ${ssh} ${target_a} 'setsebool -P haproxy_connect_any off'
+  print_SUCCESS
+
+  pad " · Cleaning up HAProxy configuration on ${target_a}"
+  ${ssh} ${target_a} 'rm -rf /var/lib/haproxy /etc/haproxy /etc/sysconfig/haproxy /etc/pki/haproxy /root/servera.lab.example.com.* /root/cacert.pem /root/haproxy.pem'
+  print_SUCCESS
+
+  pad " · Cleaning up the certificate on ${target_a}"
+  ${ssh} ${target_a} "rm -rf /root/${problem_name}"
+  print_SUCCESS
+
+  pad " · Closing the firewall port on ${target_a}"
+  ${ssh} ${target_a} 'firewall-cmd --remove-port=9000/tcp --remove-port=6081/tcp --remove-port=80/tcp --remove-port=443/tcp --permanent ; firewall-cmd --remove-service=http --remove-service=https --permanent ; firewall-cmd --reload'
+  print_SUCCESS
+
+  pad " · Stopping varnish and varnishncsa on ${target_b}"
+  ${ssh} ${target_b} 'systemctl stop varnish varnishncsa'
+  print_SUCCESS
+
+  pad " · Removing the varnish package from ${target_b}"
+  ${ssh} ${target_b} 'yum remove -y varnish varnish-docs httpd php'
+  print_SUCCESS
+
+  pad " · Cleaning up varnish configuration on ${target_b}"
+  ${ssh} ${target_b} 'rm -rf /var/log/varnish /var/lib/varnish /etc/varnish /etc/systemd/system/varnish.service.d /var/www/html/* /var/log/httpd /var/lib/httpd /etc/httpd/conf/*'
+  print_SUCCESS
+
+  pad " · Closing the firewall port on ${target_b}"
+  ${ssh} ${target_b} 'firewall-cmd --remove-port=9000/tcp --remove-port=6081/tcp --remove-port=80/tcp --remove-port=443/tcp --permanent ; firewall-cmd --remove-service=http --remove-service=https --permanent ; firewall-cmd --reload'
+  print_SUCCESS
+
+  pad " · Removing the httpd and php packages from ${target_c}"
+  ${ssh} ${target_c} 'yum remove -y varnish varnish-docs httpd php'
+  print_SUCCESS
+
+  pad " · Cleaning up httpd configuration on ${target_c}"
+  ${ssh} ${target_c} 'rm -rf /var/log/varnish /var/lib/varnish /etc/varnish /etc/systemd/system/varnish.service.d /var/www/html/* /var/log/httpd /var/lib/httpd /etc/httpd/conf/*'
+  print_SUCCESS
+
+  pad " · Closing the firewall port on ${target_c}"
+  ${ssh} ${target_c} 'firewall-cmd --remove-port=9000/tcp --remove-port=6081/tcp --remove-port=80/tcp --remove-port=443/tcp --permanent ; firewall-cmd --remove-service=http --remove-service=https --permanent ; firewall-cmd --reload'
+  print_SUCCESS
+
+  pad " · Removing the varnish-docs package from workstation"
+  yum remove -y varnish varnish-docs haproxy
+  print_SUCCESS
+
+  pad " · Cleaning up the certificates on workstation"
+  rhel_certs_delete ${target_a}.lab.example.com
+  print_SUCCESS
+
+  print_line
+  print_line 'Lab finished.'
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

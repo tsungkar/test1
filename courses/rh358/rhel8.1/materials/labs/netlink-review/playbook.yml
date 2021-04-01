@@ -1,0 +1,40 @@
+---
+
+- name: Configure team network device
+  hosts: servers
+  become: true
+
+  vars:
+    network_connections:
+
+      - name:
+        state:
+        type:
+        interface_name:
+        ip:
+          dhcp4:
+          auto6:
+          address:
+            -
+
+      - name:
+        state:
+        type:
+        interface_name:
+        master:
+
+      - name:
+        state:
+        type:
+        interface_name:
+        master:
+
+  roles:
+    -
+
+  tasks:
+    - name: Tune team runner to activebackup
+      command:
+
+    - name: Reboot the server
+      reboot:

@@ -1,0 +1,82 @@
+---
+- name: Unconfigure bastion DNS to Support Email
+  hosts: bastion.lab.example.com
+  gather_facts: no
+  remote_user: root
+
+  tasks:
+    - name: Unconfigure dnsmasq for SMTP and IMAP support
+      file:
+        path: /etc/dnsmasq.d/email-labs
+        state: absent
+
+    - name: Restart the dnsmasq daemon
+      systemd:
+        name: dnsmasq
+        state: restarted
+
+- name: Tear Down the Relay Email Server
+  hosts: bastion.lab.example.com
+  gather_facts: yes
+  remote_user: root
+
+  vars:
+    packages:
+    - dovecot
+    - postfix
+    services:
+    - dovecot
+    - postfix
+    firewall_services:
+    - smtp
+    firewall_ports:
+    - 587/tcp
+    - 993/tcp
+
+  tasks:
+    - name: Delete Apache copy of dovecot certificate
+      file:
+        path: /var/www/html/dovecot.pem
+        state: absent
+
+    - name: Close firewall for services
+      firewalld:
+        service: "{{ item }}"
+        state: disabled
+        permanent: yes
+        immediate: yes
+      loop: "{{ firewall_services }}"
+
+    - name: Close other firewall ports
+      firewalld:
+        port: "{{ item }}"
+        state: disabled
+        permanent: yes
+        immediate: yes
+      loop: "{{ firewall_ports }}"
+
+    - name: Erase email packages
+      yum:
+        name: "{{ packages }}"
+        state: absent
+
+    - name: Remove student mailbox
+      file:
+        path: /var/mail/student
+        state: absent
+
+- name: Restore Student Machine to Its Non-Email Server State
+  hosts: email_servers
+  gather_facts: no
+  become: true
+
+  tasks:
+    - name: Remove Postfix package
+      yum:
+        name: postfix
+        state: absent
+
+    - name: Remove Postfix configuration
+      file:
+        path: /etc/postfix
+        state: absent

@@ -1,0 +1,73 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-servicemgmt-netservice - practice script for RH358
+#
+# SYNOPSIS
+#     lab-upgrade-update {start|finish}
+#
+#        start   - prepare the system for starting the lab
+#        finish  - perform post-lab cleanup
+#
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start
+#     or finish for the particular lab.
+#
+# CHANGELOG
+#   * Thu Mar 12 2020 Dallas Spohn <dspohn@redhat.com>
+#   - original code
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin
+
+run_as_root='true'
+target='servera'
+
+declare -a valid_commands=(start finish)
+
+function lab_start {
+
+  service="chronyd"
+  print_header "Starting lab."
+  print_line "Preparing ${target} for lab exercise work:"
+  print_line
+  host_reachable ${target}
+  if ! ${ssh} ${target} "systemctl stop ${service}"
+  then
+    pad "  Error - could not stop chronyd on ${target}"
+    print_FAIL
+  else
+    # Stop the chronyd service on servera
+    pad " Terminating chronyd.service on ${target}"
+    print_SUCCESS
+    print_line
+  fi
+}
+
+function lab_finish {
+
+    service="chronyd"
+    print_header "Finishing lab."
+    #start chronyd on servera
+    if ! ${ssh} ${target} "systemctl enable --now ${service}"
+    then
+      pad " Error - service will not start on ${target}"
+      print_FAIL
+    else
+      pad " Cleaning up ${target}."
+      print_SUCCESS
+      print_line
+    fi
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+#source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"
+

@@ -1,0 +1,644 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-compreview-services - grading script for RH358 Configuring
+#               Email, Database, and Web Services comprehensive review
+#
+# SYNOPSIS
+#     lab-compreview-network {start|grade|finish}
+#
+#        start   - prepare the system for starting the lab
+#        grade   - perform evaluation steps on the system
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start, grade, or
+#     finish for the RH358 Configuring Email, Database, and Web Services
+#     comprehensive review
+#
+# CHANGELOG
+#   * Thu Jul 02 2020 George Hacker <ghacker@redhat.com>
+#   - original code
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+
+ha_proxy='servera'
+varnish_host='serverb'
+varnish_backend='serverd'
+web_server='serverc'
+web_server_fqdn='serverc.lab.example.com'
+db_server='serverd'
+
+null_client='serverc'
+relay_server='bastion'
+
+ansible_proj_dir=/home/student/cr-services
+
+declare -a valid_commands=(start grade finish)
+
+function lab_start {
+
+  print_header "Starting ${problem_name} exercise."
+
+  host_reachable bastion servera serverb serverc serverd
+
+  #  On workstation:
+  rhel_install_ansible
+
+  pad " · Installing the rhel-system-roles package on workstation"
+  if yum install -y rhel-system-roles
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  rhel_config_ansible ${ansible_proj_dir}
+
+  rhel_lab_run_ansible ${grade_verb}
+
+  #
+  # Web servers preparation (serverc)
+  #
+
+  pad " · Creating host certificate for ${web_server}"
+  if rhel_certs_create ${web_server_fqdn} ; then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Copying the CA certificates to ${problem_name}"
+  cp /etc/pki/CA/example-ca.crt \
+     /etc/pki/CA/cacert.pem ${ansible_proj_dir}/files/
+  print_SUCCESS
+
+  pad " · Copying the host certificate and key to ${problem_name}"
+  cp /etc/pki/CA/certs/${web_server_fqdn}.crt \
+     /etc/pki/CA/private/${web_server_fqdn}.key \
+     ${ansible_proj_dir}/files/
+  chown -R student:student ${ansible_proj_dir}
+  print_SUCCESS
+
+  pad " · Creating the www alias for ${web_server}"
+  if rhel_dns_cname_create www-${web_server_fqdn#server},${web_server_fqdn} ; then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad ' · Ensuring HTTPD and Nginx packages are not present'
+  if ${ssh} ${web_server} 'yum remove -y httpd nginx' ; then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Resetting ${web_server} firewall rules"
+  cmd1='firewall-cmd --remove-service=http --remove-service=https --permanent'
+  cmd2='firewall-cmd --remove-service=http --remove-service=https'
+  ${ssh} ${web_server} "${cmd1} && ${cmd2}"
+  print_SUCCESS
+
+  #
+  # Optimizing web server preparation
+  #
+
+  pad " · Installing the socat package on ${ha_proxy}"
+  if ${ssh} ${ha_proxy} 'yum install -y socat' ; then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Creating an SSL certificate for ${ha_proxy}"
+  if rhel_certs_create ${ha_proxy}.lab.example.com ; then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Copying the certificate to ${ha_proxy}"
+  if ${ssh} ${ha_proxy} "mkdir -p /root/${problem_name}" ; then
+    ${scp} /etc/pki/CA/certs/${ha_proxy}.lab.example.com.crt \
+           /etc/pki/CA/private/${ha_proxy}.lab.example.com.key \
+           ${ha_proxy}:/root/${problem_name}/
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Copying the certificates to ~/${ansible_proj_dir##*/}"
+  cp /etc/pki/CA/certs/${ha_proxy}.lab.example.com.crt /etc/pki/CA/private/${ha_proxy}.lab.example.com.key ${ansible_proj_dir}/files
+  cp /etc/pki/CA/cacert.pem ${ansible_proj_dir}
+  chown -R student:student ${ansible_proj_dir}
+  print_SUCCESS
+
+  print_line
+}
+
+function verify_mariadb_service_status {
+  pad ' · Checking if MariaDB service is enabled'
+  if ${ssh} ${db_server} 'systemctl is-enabled mariadb' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+  pad ' · Checking if MariaDB service is running'
+  if ${ssh} ${db_server} 'systemctl is-active mariadb' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+}
+
+function verify_database_exists {
+  pad ' · Verify legacy database exists'
+  if ${ssh} ${db_server} 'mysql -uroot -predhat -e "use legacy"' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+}
+
+function verify_mysql_firewall {
+  pad " · Verify firewall allows mysql service on ${db_server}"
+  if ${ssh} ${db_server} 'firewall-cmd --list-services' | grep -q mysql ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+}
+
+function verify_remote_connection  {
+  local -r user=$1
+  pad " · Verify ${user} can remote connect"
+  if ${ssh} ${web_server} "mysql -u${user} -p${user}_password -h ${db_server} -e 'show databases'" ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+}
+
+function lab_grade {
+
+  print_header "Grading ${problem_name} exercise."
+
+  host_reachable bastion servera serverb serverc serverd
+
+  #
+  # Email grading
+  #
+
+  pad " · Confirm Postfix is installed on ${null_client}"
+  if ${ssh} ${null_client} 'rpm -q --quiet postfix' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad ' · Postfix is running'
+  if ${ssh} ${null_client} 'systemctl is-active postfix' ; then
+    print_PASS
+    pad ' · Confirm postfix only listens on loopback interfaces'
+    cmd1="netstat -tlnp | awk '/:25/ { print \$4 }' | grep '127.0.0.1:25'"
+    if ${ssh} ${null_client} "${cmd1}" ; then
+      print_PASS
+    else
+      print_FAIL
+    fi
+    # Empty student mailbox on relay server
+    student_mbox='/var/spool/mail/student'
+    cmd1="> ${student_mbox} ; chown student:mail ${student_mbox} ; chmod 660 ${student_mbox}"
+    ${ssh} ${relay_server} "${cmd1}"
+    pad ' · Sending email message to student@lab.example.com'
+    cmd1='echo GRADING TEST | mail -s "Grading Test" student@lab.example.com'
+    if ${ssh} student@${null_client} "${cmd1}" ; then
+      print_SUCCESS
+      pad ' · Message was delivered to smtp.lab.example.com'
+      cmd1="grep -q 'Subject: Grading Test' ${student_mbox}"
+      if ${ssh} ${relay_server} "${cmd1}" ; then
+        print_PASS
+        pad ' · Originating address uses @lab.example.com'
+        cmd1="grep -q 'From: .*<student@lab.example.com>' ${student_mbox}"
+        if ${ssh} ${relay_server} "${cmd1}" ; then
+          print_PASS
+        else
+          print_FAIL
+        fi
+        # Delete the message
+        cmd1="> ${student_mbox} ; chown student:mail ${student_mbox} ; chmod 660 ${student_mbox}"
+        ${ssh} ${relay_server} "${cmd1}"
+      else
+        print_FAIL
+      fi
+    else
+      print_FAIL
+    fi
+  else
+    print_FAIL
+  fi
+
+  pad ' · Postfix is enabled to start at boot time'
+  if ${ssh} ${null_client} 'systemctl is-enabled postfix' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  #
+  # MariaDB grading
+  #
+
+  verify_mariadb_service_status
+  verify_database_exists
+  verify_mysql_firewall
+  verify_remote_connection mary
+  verify_remote_connection legacy
+  verify_remote_connection report
+
+  #
+  # Web servers grading
+  #
+
+  pad " · Confirm Apache or Nginx is installed on ${web_server}"
+  if ${ssh} ${web_server} 'rpm -q --quiet httpd || rpm -q --quiet nginx' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Checking for https access."
+  if curl -k https://${web_server_fqdn} ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Checking the HTTP redirection to HTTPS"
+  if curl -I  http://${web_server_fqdn} | grep -q 301 ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  #
+  # Optimizing web server grading
+  #
+
+  pad " · The varnish package is installed on ${varnish_host}"
+  if ${ssh} ${varnish_host} 'rpm -q varnish' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+  # Start (or purge) Varnish so the script can test the responses
+  ${ssh} ${varnish_host} 'systemctl restart varnish'
+
+  pad " · The varnish service is running on ${varnish_host}"
+  if ${ssh} ${varnish_host} 'systemctl is-active varnish' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The varnish service is enabled on ${varnish_host}"
+  if ${ssh} ${varnish_host} 'systemctl is-enabled varnish' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Firewall port 9000 is opened on ${varnish_host}"
+  ${ssh} ${varnish_host} 'firewall-cmd --list-all' | grep -wq 9000
+  if [ $? -eq 0 ]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Varnish is listening on port 9000 on ${varnish_host}"
+  v_output=$( ${ssh} ${varnish_host} 'ps -C varnishd -o args' )
+  if echo "${v_output}" | grep -q -- '-a.*:9000' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Varnish is using HTTP PROXY protocol on port 9000"
+  if echo "${v_output}" | grep -q -- '-a.*:9000,PROXY' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Varnish is listening on port 80 on ${varnish_host}"
+  if echo "${v_output}" | grep -q -- '-a.*:80' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Varnish back-end is ${varnish_backend}"
+  if ${ssh} ${varnish_host} 'curl http://127.0.0.1/' | grep -Fiq "${varnish_backend}" ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Varnish PURGE requests are allowed from localhost"
+  if ${ssh} ${varnish_host} 'curl -X PURGE http://127.0.0.1/' | grep -Fiq '200 Purged' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Varnish TTL is two days on ${varnish_host}"
+  v_output=$( ${ssh} ${varnish_host} cat /etc/varnish/default.vcl )
+  if echo "${v_output}" | grep -qE "set[[:space:]]+beresp.ttl[[:space:]]*=[[:space:]]*48[[:space:]]*h[[:space:]]*;" ; then
+    print_PASS
+  elif echo "${v_output}" | grep -qE "set[[:space:]]+beresp.ttl[[:space:]]*=[[:space:]]*2[[:space:]]*d[[:space:]]*;" ; then
+    print_PASS
+  elif echo "${v_output}" | grep -qE "set[[:space:]]+beresp.ttl[[:space:]]*=[[:space:]]*2880[[:space:]]*m[[:space:]]*;" ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The haproxy package is installed on ${ha_proxy}"
+  if ${ssh} ${ha_proxy} 'rpm -q haproxy' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+  # Start HAProxy so the UNIX stat socket is up
+  ${ssh} ${ha_proxy} 'systemctl start haproxy'
+
+  pad " · The haproxy service is running on ${ha_proxy}"
+  if ${ssh} ${ha_proxy} 'systemctl is-active haproxy' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · The haproxy service is enabled on ${ha_proxy}"
+  if ${ssh} ${ha_proxy} 'systemctl is-enabled haproxy' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Firewall http service is opened on ${ha_proxy}"
+  if ${ssh} ${ha_proxy} 'firewall-cmd --list-all' | grep -wq -e http -e 80 ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · Firewall https service is opened on ${ha_proxy}"
+  if ${ssh} ${ha_proxy} 'firewall-cmd --list-all' | grep -wq -e https -e 443 ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · HAProxy back-end name is lab on ${ha_proxy}"
+  sleep 5
+  h_output=$( ${ssh} ${ha_proxy} 'echo "show stat" | socat /var/lib/haproxy/stats stdio' )
+  if echo "${h_output}" | grep -qi '^lab,BACKEND,' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # pad " · HAProxy back-end mode is http on ${ha_proxy}"
+  # if echo "${h_output}" | grep -qi '^lab,BACKEND,.*,http,' ; then
+  #   print_PASS
+  # else
+  #   print_FAIL
+  # fi
+
+  pad " · HAProxy back-end algorithm is roundrobin on ${ha_proxy}"
+  if echo "${h_output}" | grep -qi '^lab,BACKEND,.*,roundrobin,' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · HAProxy back-end server is ${varnish_host} on ${ha_proxy}"
+  if echo "${h_output}" | grep -qi "^lab,${varnish_host}" ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · HAProxy back-end IP is 172.25.250.11:9000 on ${ha_proxy}"
+  if echo "${h_output}" | grep -qi '^lab,.*,172.25.250.11:9000,' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · HAProxy back-end configured for HTTP PROXY on ${ha_proxy}"
+
+  if ${ssh} ${ha_proxy} 'grep -Fq send-proxy-v2 /etc/haproxy/haproxy.cfg' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · HAProxy front-end name is web on ${ha_proxy}"
+  if echo "${h_output}" | grep -qi '^web,FRONTEND,' ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # pad " · HAProxy front-end mode is http on ${ha_proxy}"
+  # if echo "${h_output}" | grep -qi '^web,FRONTEND,.*,http,' ; then
+  #   print_PASS
+  # else
+  #   print_FAIL
+  # fi
+
+  pad " · HAProxy is responding on port 80 on ${ha_proxy}"
+  if h_output=$( curl -I http://${ha_proxy}/ ) ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · HAProxy is redirecting port 80 to 443 on ${ha_proxy}"
+  if echo "${h_output}" | grep -qi "location:.*https://${ha_proxy}" ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · HAProxy is responding on port 443 on ${ha_proxy}"
+  if curl -k https://${ha_proxy}/ ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad " · HAProxy is terminating HTTPS with ${ha_proxy} certificate"
+  if curl --cacert ${ansible_proj_dir}/cacert.pem https://${ha_proxy}.lab.example.com/
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # Overall grade
+  print_line
+  pad 'Overall lab grade'
+  if [[ ${fail_count} -eq 0 ]] ; then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+function lab_finish {
+
+  print_header "Finishing ${problem_name} exercise."
+
+  host_reachable bastion servera serverb serverc serverd
+
+  rhel_lab_run_ansible ${grade_verb}
+
+### Web services
+
+  pad " · Removing the www CNAME for ${web_server}"
+  if rhel_dns_cname_delete ; then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Removing the certificates for ${web_server}"
+  # Always succeed
+  rhel_certs_delete ${web_server_fqdn}
+  print_SUCCESS
+
+  pad " · Remove HTTPD and Nginx packages from ${web_server}"
+  if ${ssh} ${web_server} 'yum remove -y httpd nginx' ; then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  # Remove directories created with the exercise. /srv/*
+  pad " · Removing virtual server directories"
+  ${ssh} ${web_server} 'rm -rf /srv/*'
+  print_SUCCESS
+
+  # Remove directories created with the exercise. /etc/httpd/conf.d/serverdc.conf*
+  pad " · Removing Apache configuration files"
+  ${ssh} ${web_server} 'rm -rf /etc/httpd/conf.d/'
+  print_SUCCESS
+
+  # Removing configuration files from serverb
+  pad " · Ensuring that the configuration for NGINX is cleaned up."
+  ${ssh} ${web_server} 'rm -rf /etc/nginx/conf.d/*'
+  print_SUCCESS
+
+  # Remove the certificates and keys from /etc/pki/tls/certs
+  pad " · Removing certificates and private keys"
+  ${ssh} ${web_server} 'rm -rf /etc/pki/tls/certs/* /etc/pki/tls/private/*'
+  print_SUCCESS
+
+  pad " · Resetting ${web_server} firewall rules"
+  ${ssh} ${web_server} 'firewall-cmd --remove-service=http --remove-service=httpd --permanent'
+  ${ssh} ${web_server} 'firewall-cmd --remove-service=http --remove-service=httpd'
+  print_SUCCESS
+
+### Optimize web services
+
+  pad " · Removing the haproxy and socat packages from ${ha_proxy}"
+  ${ssh} ${ha_proxy} 'yum remove -y haproxy varnish-docs socat'
+  print_SUCCESS
+
+  pad " · Resetting SELinux Boolean on ${ha_proxy}"
+  ${ssh} ${ha_proxy} 'setsebool -P haproxy_connect_any off'
+  print_SUCCESS
+
+  pad " · Cleaning up HAProxy configuration on ${ha_proxy}"
+  ${ssh} ${ha_proxy} "rm -rf /var/lib/haproxy /etc/haproxy /etc/sysconfig/haproxy /etc/pki/haproxy /root/${ha_proxy}.lab.example.com.* /root/cacert.pem /root/haproxy.pem"
+  print_SUCCESS
+
+  pad " · Cleaning up the certificate on ${ha_proxy}"
+  ${ssh} ${ha_proxy} "rm -rf /root/${problem_name}"
+  print_SUCCESS
+
+  pad " · Resetting ${ha_proxy} firewall rules"
+  cmd1='firewall-cmd --remove-port=9000/tcp --remove-port=6081/tcp --remove-port=80/tcp --remove-port=443/tcp --permanent'
+  cmd2='firewall-cmd --remove-port=9000/tcp --remove-port=6081/tcp --remove-port=80/tcp --remove-port=443/tcp'
+  cmd3='firewall-cmd --remove-service=http --remove-service=https --permanent'
+  cmd4='firewall-cmd --remove-service=http --remove-service=https'
+  ${ssh} ${ha_proxy} "${cmd1} ; ${cmd2} ; ${cmd3} ; ${cmd4} "
+  print_SUCCESS
+
+  pad " · Stopping varnish and varnishncsa on ${varnish_host}"
+  ${ssh} ${varnish_host} 'systemctl stop varnish varnishncsa'
+  print_SUCCESS
+
+  pad " · Removing the varnish package from ${varnish_host}"
+  ${ssh} ${varnish_host} 'yum remove -y varnish varnish-docs httpd php'
+  print_SUCCESS
+
+  pad " · Cleaning up varnish configuration on ${varnish_host}"
+  ${ssh} ${varnish_host} 'rm -rf /var/log/varnish /var/lib/varnish /etc/varnish /etc/systemd/system/varnish.service.d /var/www/html/* /var/log/httpd /var/lib/httpd /etc/httpd/conf/*'
+  print_SUCCESS
+
+  pad " · Resetting ${varnish_host} firewall rules"
+  cmd1='firewall-cmd --remove-port=9000/tcp --remove-port=6081/tcp --remove-port=80/tcp --remove-port=443/tcp --permanent'
+  cmd2='firewall-cmd --remove-port=9000/tcp --remove-port=6081/tcp --remove-port=80/tcp --remove-port=443/tcp'
+  cmd3='firewall-cmd --remove-service=http --remove-service=https --permanent'
+  cmd4='firewall-cmd --remove-service=http --remove-service=https'
+  ${ssh} ${varnish_host} "${cmd1} ; ${cmd2} ; ${cmd3} ; ${cmd4} "
+  print_SUCCESS
+
+  pad " · Removing the httpd and php packages from ${web_server}"
+  ${ssh} ${web_server} 'yum remove -y varnish varnish-docs httpd php'
+  print_SUCCESS
+
+  pad " · Cleaning up httpd configuration on ${web_server}"
+  ${ssh} ${web_server} 'rm -rf /var/log/varnish /var/lib/varnish /etc/varnish /etc/systemd/system/varnish.service.d /var/www/html/* /var/log/httpd /var/lib/httpd /etc/httpd/conf/*'
+  print_SUCCESS
+
+  pad " · Resetting ${web_server} firewall rules"
+  cmd1='firewall-cmd --remove-port=9000/tcp --remove-port=6081/tcp --remove-port=80/tcp --remove-port=443/tcp --permanent'
+  cmd2='firewall-cmd --remove-port=9000/tcp --remove-port=6081/tcp --remove-port=80/tcp --remove-port=443/tcp'
+  cmd3='firewall-cmd --remove-service=http --remove-service=https --permanent'
+  cmd4='firewall-cmd --remove-service=http --remove-service=https'
+  ${ssh} ${web_server} "${cmd1} ; ${cmd2} ; ${cmd3} ; ${cmd4} "
+  print_SUCCESS
+
+  pad " · Removing the varnish-docs package from workstation"
+  yum remove -y varnish varnish-docs haproxy
+  print_SUCCESS
+
+  pad " · Cleaning up the certificates on workstation"
+  rhel_certs_delete ${ha_proxy}.lab.example.com
+  print_SUCCESS
+
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

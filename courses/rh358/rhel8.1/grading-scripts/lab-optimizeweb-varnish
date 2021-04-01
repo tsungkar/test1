@@ -1,0 +1,177 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-optimizeweb-varnish - grading script for RH358 Caching Static Content
+#                               with Varnish guided exercise.
+#
+# SYNOPSIS
+#     lab-optimizeweb-varnish {start|finish}
+#
+#        start   - prepare the system for starting the lab
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start or finish
+#     for the Caching Static Content with Varnish guided exercise.
+#
+# CHANGELOG
+#   * Fri Apr 17 2020 Herve Quatremain <hquatrem@redhat.com>
+#   - original code
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+target_b='serverb'
+target_c='serverc'
+
+# This defines which subcommands are supported (start, grade, etc.).
+# Corresponding lab_COMMAND functions must be defined.
+declare -a valid_commands=(start finish)
+
+
+function lab_start {
+
+  print_header 'Starting lab.'
+
+  print_line "Preparing ${target_c} for lab exercise work:"
+  print_line
+  host_reachable ${target_c}
+
+  pad " · Installing the httpd and php packages on ${target_c}"
+  if ${ssh} ${target_c} 'yum install -y httpd php'
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Deploying some web content on ${target_c}"
+  ${ssh} ${target_c} "echo 'This is ${target_c}' > /var/www/html/static.html"
+  cat <<'EOF' | ${ssh} ${target_c} "cat > /var/www/html/get-request.php"
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>Request Details</title>
+  </head>
+  <body>
+
+<?php
+echo "The request is coming from " . $_SERVER["REMOTE_ADDR"] . " <br>\n";
+
+if(array_key_exists("HTTP_X_FORWARDED_FOR", $_SERVER)) {
+	echo "The HTTP_X_FORWARDED_FOR header is set to " . $_SERVER["HTTP_X_FORWARDED_FOR"] . " <br>\n";
+}
+else {
+	echo "The HTTP_X_FORWARDED_FOR header is not set. <br>\n";
+}
+?>
+
+  </body>
+</html>
+EOF
+  cat <<'EOF' | ${ssh} ${target_c} "cat > /var/www/html/set-cookie.php"
+<!DOCTYPE html>
+<?php
+$cookie_name = "SESSIONID";
+$cookie_value = "123456789";
+// The cookie expires in 30 days (1 day = 86400 seconds)
+setcookie($cookie_name, $cookie_value, time() + (86400 * 30), "/");
+?>
+<html lang="en">
+  <head>
+    <title>Set a Cookie</title>
+  </head>
+  <body>
+<?php
+if(array_key_exists($cookie_name, $_COOKIE)) {
+	echo "The $cookie_name cookie is set to " . $_COOKIE[$cookie_name] . " <br>\n";
+}
+?>
+  </body>
+</html>
+EOF
+  cat <<'EOF' | ${ssh} ${target_c} "cat > /var/www/html/set-cache.php"
+<!DOCTYPE html>
+<?php
+header("Cache-Control: max-age=180" ); // 3 minutes
+?>
+<html lang="en">
+  <head>
+    <title>Set Cache Expiration</title>
+  </head>
+  <body>
+    Cached for three minutes.
+  </body>
+</html>
+EOF
+  print_SUCCESS
+
+  pad " · Configuring firewall ports on ${target_c}"
+  ${ssh} ${target_c} "firewall-cmd --add-service=http ; firewall-cmd --add-service=http --permanent"
+  print_SUCCESS
+
+  pad " · Starting and enabling httpd on ${target_c}"
+  if ${ssh} ${target_c} "systemctl enable --now httpd.service"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+
+function lab_finish {
+
+  print_header "Cleaning up the lab on ${target_b} and ${target_c}:"
+  host_reachable ${target_b} ${target_c}
+
+  pad " · Stopping the varnish and varnishncsa services from ${target_b}"
+  ${ssh} ${target_b} 'systemctl stop varnish varnishncsa'
+  print_SUCCESS
+
+  pad " · Removing the varnish and varnish-docs packages from ${target_b}"
+  ${ssh} ${target_b} 'yum remove -y varnish varnish-docs'
+  print_SUCCESS
+
+  pad " · Cleaning up varnish configuration on ${target_b}"
+  ${ssh} ${target_b} 'rm -rf /var/log/varnish /var/lib/varnish /etc/varnish /etc/systemd/system/varnish.service.d'
+  print_SUCCESS
+
+  pad " · Closing the firewall port on ${target_b}"
+  ${ssh} ${target_b} 'firewall-cmd --remove-service=http --permanent ; firewall-cmd --remove-service=http'
+  print_SUCCESS
+
+  pad " · Removing the varnish-docs package from workstation"
+  yum remove -y varnish varnish-docs
+  print_SUCCESS
+
+  pad " · Removing the httpd and php packages from ${target_c}"
+  ${ssh} ${target_c} 'yum remove -y httpd php'
+  print_SUCCESS
+
+  pad " · Removing web content from ${target_c}"
+  ${ssh} ${target_c} "rm -rf /var/www/html/* /var/log/httpd /var/lib/httpd"
+  print_SUCCESS
+
+  pad " · Closing the firewall port on ${target_c}"
+  ${ssh} ${target_c} 'firewall-cmd --remove-service=http --permanent ; firewall-cmd --remove-service=http'
+  print_SUCCESS
+
+  print_line
+  print_line 'Lab finished.'
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

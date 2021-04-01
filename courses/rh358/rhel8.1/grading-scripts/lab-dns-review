@@ -1,0 +1,217 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-dns-review - grading script for RH358 Managing DNS and DNS Servers
+#
+#
+# SYNOPSIS
+#     lab-dns-review {start|grade|finish}
+#
+#        start   - prepare the system for starting the lab
+#        grade   - perform evaluation steps on the system
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start, grade, or
+#     finish for the Managing DNS and DNS Servers lab.
+#
+# CHANGELOG
+#   * Thu Jul 02 2020 George Hacker <ghacker@redhat.com>
+#   - Call rhel_config_ansible() to download student project files
+#   * Fri Jun 12 2020 George Hacker <ghacker@redhat.com>
+#   - Call rhel_erase_unbound() library function
+#   - Require bastion to be reachable for start/finish
+#   * Mon Apr 27 2020 Victor Costea <vcostea@redhat.com>
+#   - original code
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+
+targetw='workstation'
+targeta='servera'
+targetb='serverb'
+targetc='serverc'
+targetd='serverd'
+targeta_ip='192.168.0.10/24'
+targetb_ip='192.168.0.11/24'
+targetc_ip='192.168.0.12/24'
+targetd_ip='192.168.0.13/24'
+
+con_name='lab_conn'
+
+ansible_proj_dir='/home/student/dns-review'
+
+declare -a valid_commands=(start grade finish)
+
+function lab_start {
+
+  print_header "Starting ${problem_name} exercise."
+
+  host_reachable bastion ${targeta} ${targetb} ${targetc} ${targetd}
+
+  # Reconfigure bastion with BIND9
+  rhel_bastion_bind
+
+  # Download student project files
+  rhel_config_ansible ${ansible_proj_dir}
+
+  # Configure a second network connection on server[a-d] with static IPs
+  for target_ip in ${targeta},${targeta_ip} ${targetb},${targetb_ip} ${targetc},${targetc_ip} ${targetd},${targetd_ip}
+  do
+    target=${target_ip%%,*}
+    ip_addr=${target_ip##*,}
+
+    if ! host_iface=$(rhel_get_nicname ${target} 2); then
+      pad " · Error: unable to get host 2nd interface name - ${target}"
+      print_FAIL
+      exit 1
+    fi
+
+    if ! ${ssh} ${target} "nmcli con show '${con_name}'"; then
+      pad " · Configuring ${host_iface} network interface on ${target}"
+      cmd1="nmcli con add con-name '${con_name}' type ethernet ifname ${host_iface}"
+      cmd2="nmcli con mod '${con_name}' ipv4.addresses '${ip_addr}'"
+      cmd3="nmcli con mod '${con_name}' ipv4.method manual"
+      cmd4="nmcli con up '${con_name}'"
+      if ${ssh} ${target} "${cmd1} && ${cmd2} && ${cmd3} && ${cmd4}"; then
+        print_SUCCESS
+      else
+        print_FAIL
+      fi
+    fi
+  done
+
+  # Remove Unbound from servera, BIND from serverb
+  rhel_erase_unbound ${targeta}
+  rhel_erase_bind ${targetb}
+
+  print_line
+}
+
+function lab_grade {
+
+  print_header "Grading the student's work for ${problem_name}"
+
+  host_reachable bastion ${targeta} ${targetb} ${targetc} ${targetd}
+
+  # Should return REFUSED from servera localhost  @172.25.250.11
+  pad " · On ${targeta} localhost query REFUSED from classroom"
+  cmd1="dig +time=1 localhost.localdomain @172.25.250.11 | grep REFUSED"
+  if ${ssh} ${targeta} ${cmd1}
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # Should succeed from servera localhost  @192.168.0.11
+  pad " · On ${targeta} localhost query successful from backend"
+  cmd1="dig +time=1 localhost.localdomain @192.168.0.11"
+  if ${ssh} ${targeta} "${cmd1}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # Forward lookup serverc  @192.168.0.11
+  pad " · On ${targeta} forward lookup serverc using backend"
+  cmd1="dig +time=1 serverc.backend.lab.example.com @192.168.0.11"
+  if ${ssh} ${targeta} "${cmd1}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # From serverb reverse IPv4 lookup serverd using @localhost
+  pad " · On ${targetb} reverse IPv4 lookup serverc using @localhost"
+  cmd1="dig +time=1 -x 192.168.0.13 @localhost"
+  if ${ssh} ${targetb} "${cmd1}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # From serverb reverse IPv6 lookup serverd using @localhost
+  pad " · On ${targetb} reverse IPv6 lookup serverc using @localhost"
+  cmd1="dig +time=1 -x fde2:6494:1e09:2::d @localhost"
+  if ${ssh} ${targetb} "${cmd1}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # From serverb confirm servera caching backend entries
+  pad " · On ${targetb} check that ${targeta} is caching backend entries"
+  cmd1="dig +time=1 serverd.backend.lab.example.com @172.25.250.10"
+  if ${ssh} ${targetb} "${cmd1}"
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # Overall grade
+  print_line
+  pad 'Overall lab grade'
+  if [[ ${fail_count} -eq 0 ]]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+function lab_finish {
+
+  print_header "Finishing ${problem_name} exercise."
+
+  host_reachable bastion ${targeta} ${targetb} ${targetc} ${targetd}
+
+  for target_ip in ${targeta},${targeta_ip} ${targetb},${targetb_ip} ${targetc},${targetc_ip} ${targetd},${targetd_ip}
+  do
+    target=${target_ip%%,*}
+    ip_addr=${target_ip##*,}
+
+    if ! host_iface=$(rhel_get_nicname ${target} 2); then
+      pad " · Error: unable to get host 2nd interface name - ${target}"
+      print_FAIL
+      exit 1
+    fi
+
+    if ${ssh} ${target} "nmcli con show '${con_name}'"; then
+      pad " · Unconfiguring ${host_iface} network interface on ${target}"
+      if ${ssh} ${target} "nmcli con del '${con_name}'"; then
+        print_SUCCESS
+      else
+        print_FAIL
+      fi
+    fi
+  done
+
+  # Unconfigure BIND on bastion
+  rhel_bastion_unbind
+
+  # Remove Unbound from servera, BIND from serverb
+  rhel_erase_unbound ${targeta}
+  rhel_erase_bind ${targetb}
+
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

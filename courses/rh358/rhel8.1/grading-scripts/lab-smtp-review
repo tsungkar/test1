@@ -1,0 +1,230 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-smtp-review - grading script for RH358 Configuring Email
+#                       Transmission lab
+#
+# SYNOPSIS
+#     lab-smtp-review {start|grade|finish}
+#
+#        start   - prepare the system for starting the lab
+#        grade   - perform evaluation steps on the system
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start, grade,
+#     or finish for the RH358 Configuring Email Transmission lab.
+#
+# CHANGELOG
+#   * Thu 30 Jul 2020 Herve Quatremain <hquatrem@redhat.com>
+#   - Fixing the smtp-review-start.yml playbook to stop and disable named,
+#     restart dnsmasq, and verify its status on bastion.
+#   - Checking and reporting the result of the ansible-playbook run in the
+#     lab_start() function.
+#   - Fixing Jira RH358-38
+#   * Thu Jul 02 2020 George Hacker <ghacker@redhat.com>
+#   - Call rhel_config_ansible() to download student project files
+#   * Mon Jun 01 2020 George Hacker <ghacker@redhat.com>
+#   - original code
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+
+ansible_host='workstation'
+null_client='serverb'
+relay_server='bastion'
+
+lab_playbook_dir='classroom/ansible'
+lab_playbook_tar="${problem_name}.tar"
+lab_playbook_start="${problem_name}-start.yml"
+lab_playbook_finish="${problem_name}-finish.yml"
+tmp_dir="/tmp/${problem_name}"
+
+ansible_proj_dir='/home/student/smtp-review'
+
+declare -a valid_commands=(start grade finish)
+
+function lab_start {
+
+  print_header "Starting ${problem_name} exercise."
+
+  host_reachable ${null_client} ${relay_server}
+
+  pad " · Installing the rhel-system-roles package on workstation"
+  if yum install -y rhel-system-roles
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  # Download student project files
+  rhel_config_ansible ${ansible_proj_dir}
+
+  # Create /tmp/problem_name directory and cd there
+  rm -rf ${tmp_dir} ; mkdir -p ${tmp_dir}
+  if ! cd ${tmp_dir}
+  then
+    pad ' · Error: unable to create staging directory'
+    print_FAIL
+    exit 1
+  fi
+
+  # Download GE start playbook
+  pad ' · Download lab playbooks'
+  cmd1="curl -O http://materials.example.com/${lab_playbook_dir}/${lab_playbook_tar}"
+  cmd2="tar xf ${lab_playbook_tar} -C /tmp"
+  if ${cmd1} && ${cmd2}
+  then
+    rm -f ${lab_playbook_tar}
+    print_SUCCESS
+    # Run GE start playbook
+    pad ' · Run lab preparation playbook'
+    ansible-playbook ${lab_playbook_start} &
+    pid=$!
+    spinner ${pid} 3
+    if wait ${pid}
+    then
+      cd
+      rm -rf ${tmp_dir}
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+function lab_grade {
+
+  print_header "Grading ${problem_name} exercise."
+
+  host_reachable ${null_client} ${relay_server}
+
+  pad " · Confirm Postfix is installed on ${null_client}"
+  if ${ssh} ${null_client} 'rpm -q --quiet postfix'
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  pad ' · Postfix is running'
+  if ${ssh} ${null_client} 'systemctl is-active postfix'
+  then
+    print_PASS
+    pad ' · Confirm postfix only listens on loopback interfaces'
+    cmd1="netstat -tlnp | awk '/:25/ { print \$4 }' | grep '127.0.0.1:25'"
+    if ${ssh} ${null_client} "${cmd1}"
+    then
+      print_PASS
+    else
+      print_FAIL
+    fi
+    # Empty student mailbox on relay server
+    cmd1='> /var/spool/mail/student ; chown student:mail /var/spool/mail/student ; chmod 660 /var/spool/mail/student'
+    ${ssh} ${relay_server} "${cmd1}"
+    pad ' · Sending email message to student@lab.example.com'
+    cmd1='echo GRADING TEST | mail -s "Grading Test" student@lab.example.com'
+    if ${ssh} student@${null_client} "${cmd1}"
+    then
+      print_SUCCESS
+      pad ' · Message was delivered to smtp.lab.example.com'
+      cmd1='grep -q "Subject: Grading Test" /var/spool/mail/student'
+      if ${ssh} ${relay_server} "${cmd1}"
+      then
+        print_PASS
+        pad ' · Originating address uses @lab.example.com'
+        cmd1='grep -q "From: .*<student@lab.example.com>" /var/spool/mail/student'
+        if ${ssh} ${relay_server} "${cmd1}"
+        then
+          print_PASS
+        else
+          print_FAIL
+        fi
+        # Delete the message
+        cmd1='> /var/spool/mail/student ; chown student:mail /var/spool/mail/student ; chmod 660 /var/spool/mail/student'
+        ${ssh} ${relay_server} "${cmd1}"
+      else
+        print_FAIL
+      fi
+    else
+      print_FAIL
+    fi
+  else
+    print_FAIL
+  fi
+
+  pad ' · Postfix is enabled to start at boot time'
+  if ${ssh} ${null_client} 'systemctl is-enabled postfix'
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  # Overall grade
+  print_line
+  pad 'Overall lab grade'
+  if [[ ${fail_count} -eq 0 ]]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+function lab_finish {
+
+  print_header "Finishing ${problem_name} exercise."
+
+  host_reachable ${null_client} ${relay_server}
+
+  # Create /tmp/problem_name directory and cd there
+  rm -rf ${tmp_dir} ; mkdir -p ${tmp_dir}
+  if ! cd ${tmp_dir}
+  then
+    pad ' · Error: unable to create staging directory'
+    print_FAIL
+    exit 1
+  fi
+
+  # Download GE finish playbook
+  pad ' · Download lab playbooks'
+  cmd1="curl -O http://materials.example.com/${lab_playbook_dir}/${lab_playbook_tar}"
+  cmd2="tar xf ${lab_playbook_tar} -C /tmp"
+  if ${cmd1} && ${cmd2}
+  then
+    rm -f ${lab_playbook_tar}
+    print_SUCCESS
+    # Run GE finish playbook
+    pad ' · Run lab cleanup playbook'
+    if ansible-playbook ${lab_playbook_finish} & spinner $! 3
+    then
+      cd
+      rm -rf ${tmp_dir}
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

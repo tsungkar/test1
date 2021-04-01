@@ -1,0 +1,590 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     filestorage-automation - grading script for RH358 Automating File-Based
+#                              Storage Provisioning guided exercise
+#
+# SYNOPSIS
+#     filestorage-automation {start|finish}
+#
+#        start   - prepare the system for starting the lab
+#        finish  - perform post-lab cleanup
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start
+#     or finish for the Automating File-Based Storage Provisioning guided
+#     exercise.
+#
+# CHANGELOG
+#   * Wed May 20 2020 Herve Quatremain <hquatrem@redhat.com>
+#   - original code
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Initialize and set some variables
+run_as_root='true'
+target_a='servera'
+target_d='serverd'
+
+# Samba
+smb_share_dir='/smbshare'
+smb_mount_point='/developments'
+linux_users=(developer1 developer2 sambamount)
+linux_groups=(developers)
+
+# NFS
+nfs_share_dir='/nfsshare'
+nfs_mount_point='/share'
+
+
+# This defines which subcommands are supported (start, grade, etc.).
+# Corresponding lab_COMMAND functions must be defined.
+declare -a valid_commands=(start finish)
+
+
+function lab_start {
+
+  print_header 'Starting lab.'
+
+  print_line "Preparing ${target_a} and ${target_d} for lab exercise work:"
+  print_line
+  host_reachable ${target_a} ${target_d}
+
+  pad " · Backing up /etc/fstab on ${target_a}"
+  if ${ssh} ${target_a} "test -s /var/tmp/lab-${problem_name}-fstab || cp /etc/fstab /var/tmp/lab-${problem_name}-fstab"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad " · Backing up /etc/samba/smb.conf on ${target_d}"
+  if ${ssh} ${target_d} "test -s /var/tmp/lab-${problem_name}-smb.conf || cp /etc/samba/smb.conf /var/tmp/lab-${problem_name}-smb.conf"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  #
+  # workstation
+  #
+
+  if [ -e "/home/student/${problem_name}" ]
+  then
+    pad " · Saving existing ~/${problem_name}"
+    if mv /home/student/${problem_name} /home/student/${problem_name}.$(date +%m-%d-%H:%M:%S)
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  rhel_install_ansible
+
+  pad " · Deploying the Ansible files on workstation"
+  mkdir -p /home/student/${problem_name}/{templates,solution}
+
+  cat <<'EOF' > /home/student/${problem_name}/solution/nfs_server.yml
+---
+- name: Export a directory using NFS
+  hosts: serverd.lab.example.com
+  become: true
+  vars:
+    shared_dir: /nfsshare
+
+  tasks:
+    - name: the nfs-utils package is installed
+      yum:
+        name: nfs-utils
+        state: present
+
+    - name: the directory exists
+      file:
+        path: "{{ shared_dir }}"
+        owner: student
+        group: root
+        mode: '0755'
+        state: directory
+
+    - name: the directory is exported
+      template:
+        src: templates/share.exports.j2
+        dest: /etc/exports.d/share.exports
+        owner: root
+        group: root
+        mode: '0644'
+      notify: reload exports
+
+    - name: the nfs-server service is started and enabled
+      service:
+        name: nfs-server
+        state: started
+        enabled: yes
+
+    - name: the nfs firewall service is opened
+      firewalld:
+        service: nfs
+        state: enabled
+        immediate: yes
+        permanent: yes
+
+  handlers:
+    - name: reload exports
+      service:
+        name: nfs-server
+        state: reloaded
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/solution/smb_server.yml
+---
+- name: Share a directory with SMB
+  hosts: serverd.lab.example.com
+  become: true
+  vars_files:
+    - smb_vars.yml
+
+  tasks:
+    - name: the samba package is installed
+      yum:
+        name: samba
+        state: present
+
+    # Creating the Linux and Samba user for the multiuser mount.
+    # That user is only used to mount the share.
+
+    - name: the Linux user for Samba mount exists
+      user:
+        name: "{{ samba_usermount }}"
+        shell: /sbin/nologin
+        create_home: no
+        system: yes
+
+    - name: the Samba user for Samba mount exists
+      command: smbpasswd -s -a {{ samba_usermount }}
+      args:
+        stdin: "{{ samba_passmount }}\n{{ samba_passmount }}"
+
+    # Group and users with write access to the share
+
+    - name: the Linux group exists
+      group:
+        name: "{{ allowed_group }}"
+        system: yes
+
+    - name: the Linux users exist for Samba users
+      user:
+        name: "{{ item['name'] }}"
+        shell: /sbin/nologin
+        groups:
+          - "{{ allowed_group }}"
+      loop: "{{ samba_users }}"
+      no_log: true
+
+    - name: the Samba users exist
+      command: smbpasswd -s -a {{ item['name'] }}
+      args:
+        stdin: "{{ item['password'] }}\n{{ item['password'] }}"
+      loop: "{{ samba_users }}"
+      no_log: true
+
+    - name: the directory exists
+      file:
+        path: "{{ shared_dir }}"
+        owner: root
+        group: "{{ allowed_group }}"
+        mode: '2775'
+        state: directory
+        setype: samba_share_t
+
+    - name: the directory is shared
+      template:
+        src: templates/smb.conf.j2
+        dest: /etc/samba/smb.conf
+        owner: root
+        group: root
+        mode: '0644'
+        setype: samba_etc_t
+      notify: reload smb
+
+    - name: the smb service is started and enabled
+      service:
+        name: smb
+        state: started
+        enabled: yes
+
+    - name: the samba firewall service is opened
+      firewalld:
+        service: samba
+        state: enabled
+        immediate: yes
+        permanent: yes
+
+  handlers:
+    - name: reload smb
+      service:
+        name: smb
+        state: reloaded
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/inventory
+[servers]
+serverd.lab.example.com
+
+[clients]
+servera.lab.example.com
+serverb.lab.example.com
+serverc.lab.example.com
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/templates/share.exports.j2
+{{ shared_dir }}{% for host in groups['clients'] %}
+ {{ host }}(rw)
+{%- endfor %}
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/templates/smb.conf.j2
+[global]
+        workgroup = SAMBA
+        security = user
+
+        passdb backend = tdbsam
+
+        smb encrypt = required
+        server min protocol = SMB3
+
+[{{ share_name }}]
+        path = {{ shared_dir }}
+        write list = @{{ allowed_group }}
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/nfs_client.yml
+---
+- name: Access an NFS export
+  hosts: servera.lab.example.com
+  become: true
+  vars:
+    shared_dir: /nfsshare
+    mount_point: /datanfs
+
+  tasks:
+    - name: the nfs-utils package is installed
+      yum:
+        name: nfs-utils
+        state: present
+
+    - name: the NFS export is mounted and in /etc/fstab
+      mount:
+        path: "{{ mount_point }}"
+        src: serverd.lab.example.com:{{ shared_dir }}
+        state: mounted
+        fstype: nfs
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/nfs_server.yml
+---
+- name: Export a directory using NFS
+  hosts: serverd.lab.example.com
+  become: true
+  vars:
+    shared_dir: /nfsshare
+
+  tasks:
+    - name: the nfs-utils package is installed
+      #FIXME: see "ansible-doc yum" for some examples
+
+    - name: the directory exists
+      file:
+        path: "{{ shared_dir }}"
+        owner: student
+        group: root
+        mode: '0755'
+        state: directory
+
+    - name: the directory is exported
+      #FIXME: see "ansible-doc template" for some examples.
+      #       Deploy the templates/share.exports.j2 template file
+      #       to /etc/exports.d/share.exports on serverd.
+      #       The file should be owned by the root user and the
+      #       root group, and have a mode of '0644'
+      notify: reload exports
+
+    - name: the nfs-server service is started and enabled
+      #FIXME: see "ansible-doc service" for some examples
+
+    - name: the nfs firewall service is opened
+      #FIXME: see "ansible-doc firewalld" for some examples
+
+  handlers:
+    - name: reload exports
+      service:
+        name: nfs-server
+        state: reloaded
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/smb_vars.yml
+---
+shared_dir: /smbshare
+share_name: smbshare
+mount_point: /developments
+
+# User account for mounting the share
+samba_usermount: sambamount
+samba_passmount: redhat
+
+# User accounts with write access to the share
+allowed_group: developers
+samba_users:
+  - name: developer1
+    password: redhat
+  - name: developer2
+    password: redhat
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/smb_server.yml
+---
+- name: Share a directory with SMB
+  hosts: serverd.lab.example.com
+  become: true
+  vars_files:
+    - smb_vars.yml
+
+  tasks:
+    - name: the samba package is installed
+      #FIXME: see "ansible-doc yum" for some examples
+
+    # Creating the Linux and Samba user for the multiuser mount.
+    # That user is only used to mount the share.
+
+    - name: the Linux user for Samba mount exists
+      user:
+        name: "{{ samba_usermount }}"
+        shell: /sbin/nologin
+        create_home: no
+        system: yes
+
+    - name: the Samba user for Samba mount exists
+      command: smbpasswd -s -a {{ samba_usermount }}
+      args:
+        stdin: "{{ samba_passmount }}\n{{ samba_passmount }}"
+
+    # Group and users with write access to the share
+
+    - name: the Linux group exists
+      group:
+        name: "{{ allowed_group }}"
+        system: yes
+
+    - name: the Linux users exist for Samba users
+      user:
+        name: "{{ item['name'] }}"
+        shell: /sbin/nologin
+        groups:
+          - "{{ allowed_group }}"
+      loop: "{{ samba_users }}"
+      no_log: true
+
+    - name: the Samba users exist
+      command: smbpasswd -s -a {{ item['name'] }}
+      args:
+        stdin: "{{ item['password'] }}\n{{ item['password'] }}"
+      loop: "{{ samba_users }}"
+      no_log: true
+
+    - name: the directory exists
+      file:
+        path: "{{ shared_dir }}"
+        owner: root
+        group: "{{ allowed_group }}"
+        mode: '2775'
+        state: directory
+        setype: samba_share_t
+
+    - name: the directory is shared
+      template:
+        #FIXME: see "ansible-doc template" for some examples.
+        #    Deploy the templates/smb.conf.j2 template file
+        #    to /etc/samba/smb.conf on serverd.
+        #    The file should be owned by the root user and the
+        #    root group, and have a mode of '0644'
+      notify: reload smb
+
+    - name: the smb service is started and enabled
+      #FIXME: see "ansible-doc service" for some examples
+
+    - name: the samba firewall service is opened
+      #FIXME: see "ansible-doc firewalld" for some examples
+
+  handlers:
+    - name: reload smb
+      service:
+        name: smb
+        state: reloaded
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/smb_client.yml
+---
+- name: Access an SMB share
+  hosts: servera.lab.example.com
+  become: true
+  vars_files:
+   - smb_vars.yml
+
+  tasks:
+    - name: the cifs-utils package is installed
+      yum:
+        name: cifs-utils
+        state: present
+
+    - name: the credential file exists
+      copy:
+        content: "username={{ samba_usermount }}\n\
+                  password={{ samba_passmount }}\n"
+        dest: /etc/samba/creds.txt
+        owner: root
+        group: root
+        mode: '0600'
+      no_log: true
+
+    - name: the SMB share is mounted
+      mount:
+        path: "{{ mount_point }}"
+        src: "//serverd.lab.example.com/{{ share_name }}"
+        opts: "credentials=/etc/samba/creds.txt,multiuser,seal"
+        state: mounted
+        fstype: cifs
+
+    - name: the Linux users exist
+      user:
+        name: "{{ item.name }}"
+        shell: /bin/bash
+        password: "{{ item.password | \
+                   password_hash('sha512', 'redhatsalt') }}"
+      loop: "{{ samba_users }}"
+      no_log: true
+EOF
+
+  cat <<'EOF' > /home/student/${problem_name}/ansible.cfg
+[defaults]
+inventory=inventory
+remote_user=devops
+EOF
+  print_SUCCESS
+
+  pad " · Encrypting Ansible variable files on workstation"
+  TMP_FILE=$(mktemp)
+  echo redhat > "${TMP_FILE}"
+  if ansible-vault encrypt --vault-password-file="${TMP_FILE}" /home/student/${problem_name}/smb_vars.yml
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+  rm -f "${TMP_FILE}"
+  chown -R student: /home/student/${problem_name}
+
+  print_line
+}
+
+
+function lab_finish {
+
+  print_header "Cleaning up the lab on ${target_a} and ${target_d}:"
+  host_reachable ${target_a} ${target_d}
+
+  pad " · Unmounting the shares on ${target_a}"
+  ${ssh} ${target_a} "umount -afl -t cifs ; umount -afl -t nfs ; umount -afl -t nfs4 ; sleep 5"
+  print_SUCCESS
+
+  pad " · Removing the mount points from ${target_a}"
+  ${ssh} ${target_a} "rm -rf ${smb_mount_point} ${nfs_mount_point}" &
+  print_SUCCESS
+
+  pad " · Restoring /etc/fstab on ${target_a}"
+  ${ssh} ${target_a} "test -s /var/tmp/lab-${problem_name}-fstab && cp /var/tmp/lab-${problem_name}-fstab /etc/fstab ; rm -f /var/tmp/lab-${problem_name}-fstab"
+  print_SUCCESS
+
+  pad " · Removing the credential file from ${target_a}"
+  ${ssh} ${target_a} "rm -f /etc/samba/cred*"
+  print_SUCCESS
+
+  pad " · Removing the packages from ${target_a}"
+  ${ssh} ${target_a} "yum remove -y cifs-utils samba-client"
+  print_SUCCESS
+
+  pad " · Closing the firewall ports on ${target_a}"
+  ${ssh} ${target_a} 'firewall-cmd --remove-service=samba-client --remove-service=samba-dc --remove-service=samba --permanent ; firewall-cmd --remove-port=137/udp --remove-port=138/udp --remove-port=139/tcp --remove-port=445/tcp --permanent ; firewall-cmd --reload'
+  print_SUCCESS
+
+  pad " · Removing the exercise user accounts from ${target_a}"
+  for linux_user in ${linux_users[*]}
+  do
+    ${ssh} ${target_a} "userdel --force --remove ${linux_user}"
+  done
+  print_SUCCESS
+
+  pad " · Removing the exercise groups from ${target_a}"
+  for linux_group in ${linux_groups[*]}
+  do
+    ${ssh} ${target_a} "groupdel ${linux_group}"
+  done
+  print_SUCCESS
+
+  pad " · Stopping the services on ${target_d}"
+  ${ssh} ${target_d} "systemctl disable --now smb.service nmb.service nfs-server.service"
+  print_SUCCESS
+
+  pad " · Removing the packages from ${target_d}"
+  ${ssh} ${target_d} "yum remove -y samba samba-libs samba-client"
+  print_SUCCESS
+
+  pad " · Removing the samba password file from ${target_d}"
+  ${ssh} ${target_d} "rm -rf /var/lib/samba/private/*"
+  print_SUCCESS
+
+  pad " · Restoring /etc/samba/smb.conf on ${target_d}"
+  ${ssh} ${target_d} "test -s /var/tmp/lab-${problem_name}-smb.conf && cp /var/tmp/lab-${problem_name}-smb.conf /etc/samba/smb.conf ; rm -f /var/tmp/lab-${problem_name}-smb.conf"
+  print_SUCCESS
+
+  pad " · Cleaning up NFS exports on ${target_d}"
+  ${ssh} ${target_d} "rm -f /etc/exports.d/* ; > /etc/exports"
+  print_SUCCESS
+
+  pad " · Removing the shared directories from ${target_d}"
+  ${ssh} ${target_d} "rm -rf ${smb_share_dir} ${nfs_share_dir}"
+  print_SUCCESS
+
+  pad " · Removing the exercise user accounts from ${target_d}"
+  for linux_user in ${linux_users[*]}
+  do
+    ${ssh} ${target_d} "userdel --force --remove ${linux_user}"
+  done
+  print_SUCCESS
+
+  pad " · Removing the exercise groups from ${target_d}"
+  for linux_group in ${linux_groups[*]}
+  do
+    ${ssh} ${target_d} "groupdel ${linux_group}"
+  done
+  print_SUCCESS
+
+  pad " · Closing the firewall ports on ${target_d}"
+  ${ssh} ${target_d} 'firewall-cmd --remove-service=samba-client --remove-service=samba-dc --remove-service=samba --permanent ; firewall-cmd --remove-port=137/udp --remove-port=138/udp --remove-port=139/tcp --remove-port=445/tcp --permanent ; firewall-cmd --remove-service=nfs --remove-service=nfs3 --permanent ; firewall-cmd --remove-port=2049/tcp --remove-port=2049/udp --permanent ; firewall-cmd --reload'
+  print_SUCCESS
+
+  print_line
+  print_line 'Lab finished.'
+  print_line
+}
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

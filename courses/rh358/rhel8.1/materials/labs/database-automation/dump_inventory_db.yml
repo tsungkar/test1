@@ -1,0 +1,11 @@
+---
+- name: Database backup
+  hosts: db_servers
+  become: yes
+
+  tasks:
+    - name: Backup inventory database
+      FIXME:
+        state: FIXME
+        name: FIXME
+        target: /home/student/inventory.dump

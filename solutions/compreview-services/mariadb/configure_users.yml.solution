@@ -1,0 +1,30 @@
+---
+- name: Configure MariaDB users
+  hosts: db_servers
+  become: yes
+
+  tasks:
+    - name: Create users and set password if not present
+      mysql_user:
+        name: "{{ item['name'] }}"
+        update_password: on_create
+        password: "{{ item['password'] }}"
+        state: present
+      loop: "{{ mysql_user_passwords }}"
+
+    - name: Configure users in MariaDB
+      mysql_user:
+        name: "{{ item['name'] }}"
+        host: "{{ item['host'] }}"
+        priv: "{{ item['priv'] }}"
+        state: "{{ item['state'] }}"
+      loop: "{{ mysql_users }}"
+
+    - name: Update users with additional password
+      mysql_user:
+        name: "{{ item['name'] }}"
+        host_all: yes
+        update_password: always
+        password: "{{ item['password'] }}"
+        state: present
+      loop: "{{ mysql_user_passwords }}"

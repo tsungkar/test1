@@ -1,0 +1,14 @@
+[control_node]
+workstation.lab.example.com
+
+[master_dns]
+servera.lab.example.com
+
+[caching_dns]
+serverb.lab.example.com
+
+[servers]
+servera.lab.example.com
+serverb.lab.example.com
+serverc.lab.example.com
+serverd.lab.example.com

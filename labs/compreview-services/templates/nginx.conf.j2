@@ -1,0 +1,15 @@
+server {
+    listen 80 ;
+    server_name {{ item }};
+    return 301 https://$host$request_uri;
+}
+server {
+    listen 443 ssl;
+    server_name {{ item }};
+    ssl_certificate /etc/pki/tls/certs/{{ item }}.crt;
+    ssl_certificate_key /etc/pki/tls/private/{{ item }}.key;
+    location / {
+        root /srv/www/{{ item }};
+        index index.html index.htm;
+    }
+}

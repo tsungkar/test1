@@ -1,0 +1,21 @@
+$TTL 300
+
+@	IN SOA	serverb.backend.lab.example.com. dnslab.example.com. (
+				YYYYMMDD00	; serial
+				1H		; refresh
+				5M		; retry
+				1W		; expire
+				1M )		; minimum
+
+; owner		TTL	CL  type	RDATA
+		600	IN  NS		serverb
+
+servera			IN  A		192.168.0.10
+serverb			IN  A		192.168.0.11
+serverc			IN  A		192.168.0.12
+serverd			IN  A		192.168.0.13
+
+servera			IN  AAAA	fde2:6494:1e09:2::a
+serverb			IN  AAAA	fde2:6494:1e09:2::b
+serverc			IN  AAAA	fde2:6494:1e09:2::c
+serverd			IN  AAAA	fde2:6494:1e09:2::d

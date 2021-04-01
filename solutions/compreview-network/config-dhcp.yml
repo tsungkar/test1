@@ -1,0 +1,56 @@
+---
+
+- name: Deploy a DHCPv4 and DHCPv6 server
+  hosts: master_dns
+# become: true
+
+  roles:
+    - rhel-system-roles.network
+
+  tasks:
+    - name: install the dhcp-server package
+      yum:
+        name: dhcp-server
+        state: present
+
+    - name: deploy the DHCPv4 configuration file
+      copy:
+        src: files/dhcp/dhcpd.conf
+        dest: /etc/dhcp/dhcpd.conf
+      notify: reload dhcpd
+
+    - name: deploy the DHCPv6 configuration file
+      copy:
+        src: files/dhcpd6.conf
+        dest: /etc/dhcp/dhcpd6.conf
+      notify: reload dhcpd6
+
+    - name: start and enable the dhcpd and dhcpd6 services
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - dhcpd
+        - dhcpd6
+
+    - name: open the dhcp and dhcpv6 firewall services
+      firewalld:
+        service: "{{ item }}"
+        state: enabled
+        immediate: yes
+        permanent: yes
+      loop:
+        - dhcp
+        - dhcpv6
+
+  handlers:
+    - name: reload dhcpd
+      service:
+        name: dhcpd
+        state: restarted
+
+    - name: reload dhcpd6
+      service:
+        name: dhcpd6
+        state: restarted

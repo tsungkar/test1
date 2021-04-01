@@ -1,0 +1,80 @@
+---
+- name: Configure master nameserver
+  hosts: master_dns
+  remote_user: devops
+# become: yes
+
+  tasks:
+    - name: Install BIND9
+      yum:
+        name: bind
+        state: present
+
+    - name: Copy master config file
+      copy:
+        src: files/bind/named.conf
+        dest: /etc/named.conf
+        owner: root
+        group: named
+        mode: 0640
+      notify:
+        - reload_named
+
+    - name: Copy forward zone file to master
+      copy:
+        src: files/zones/pvt.example.com.zone
+        dest: /var/named/pvt.example.com.zone
+        owner: root
+        group: named
+        mode: 0640
+      notify:
+        - reload_named
+
+    - name: Copy IPv4 reverse zone file to master
+      copy:
+        src: files/zones/192.168.62.zone
+        dest: /var/named/192.168.62.zone
+        owner: root
+        group: named
+        mode: 0640
+      notify:
+        - reload_named
+
+    - name: Copy IPv6 reverse zone file to master
+      copy:
+        src: files/zones/fc62.5265.6448.6174.zone
+        dest: /var/named/fc62.5265.6448.6174.zone
+        owner: root
+        group: named
+        mode: 0640
+      notify:
+        - reload_named
+
+    - name: Copy backend config file (for zones)
+      copy:
+        src: files/bind/named.pvt.conf
+        dest: /etc/named.pvt.conf
+        owner: root
+        group: named
+        mode: 0640
+      notify:
+        - reload_named
+
+    - name: Allow dns service on firewall
+      firewalld:
+        service: dns
+        state: enabled
+        immediate: yes
+        permanent: yes
+
+    - name: Ensure named is running and enabled
+      service:
+        name: named
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: reload_named
+      service:
+        name: named
+        state: reloaded

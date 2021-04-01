@@ -1,0 +1,8 @@
+---
+
+- name: Configure network interface
+  hosts: servera.lab.example.com:serverb.lab.example.com
+  become: true
+
+  roles:
+    - rhel-system-roles.network

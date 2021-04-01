@@ -1,0 +1,22 @@
+---
+- name: Remove Varnish backend web server
+  hosts: varnish_backend
+  become: yes
+
+  tasks:
+    - name: Remove HTTP and PHP packages
+      yum:
+        name: httpd, httpd-filesystem, php
+        state: absent
+
+    - name: Remove web content
+      file:
+        path: /var/www
+        state: absent
+
+    - name: Close firewall for HTTP service
+      firewalld:
+        service: http
+        state: disabled
+        permanent: yes
+        immediate: yes

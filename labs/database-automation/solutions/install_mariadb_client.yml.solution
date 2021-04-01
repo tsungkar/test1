@@ -1,0 +1,10 @@
+---
+- name: Install MariaDB client
+  hosts: db_clients
+  become: yes 
+
+  tasks:
+    - name: Install MariaDB client package
+      yum:
+        name: mariadb
+        state: present

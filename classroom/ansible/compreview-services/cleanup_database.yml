@@ -1,0 +1,41 @@
+---
+- name: Remove MariaDB and related files
+  hosts: db_servers,db_clients
+  become: yes
+
+  tasks:
+    - name: Remove mariadb packages
+      yum:
+        name: mariadb*
+        state: absent
+
+    - name: Remove related database files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/log/mariadb
+        - /var/lib/mysql
+        - /usr/share/mariadb
+        - /etc/my.cnf
+        - /etc/my.cnf.rpmsave
+        - /etc/my.cnf.d
+        - /root/.my.cnf
+        - /root/.mysql_history
+        - /root/legacy-database.sql
+        - /home/student/legacy-database.sql
+        - /home/student/inventory.dump
+        - /srv/legacy-database.sql
+        - /tmp/legacy-database.sql
+
+- name: Remove mysql service from firewall
+  hosts: db_servers
+  become: yes
+
+  tasks:
+    - name: Close mysql service firewall ports
+      firewalld:
+        service: mysql
+        state: disabled
+        immediate: yes
+        permanent: yes

@@ -1,0 +1,31 @@
+---
+- name: Restore legacy database if not present
+  hosts: db_servers
+  become: yes
+
+  tasks:
+    - name: Make sure legacy database exists
+      mysql_db:
+        name: legacy
+        state: present
+      register: legacy_present
+
+    - name: Is legacy database backup present?
+      stat:
+        path: /srv/legacy-database.sql
+      register: legacy_bkup
+
+    - name: Copy database backup file to host if not present
+      copy:
+        src: files/legacy-database.sql
+        dest: /srv
+      when:
+        - legacy_present['changed'] == true
+        - legacy_bkup['stat']['exists'] == false
+
+    - name: Restore legacy backup data
+      mysql_db:
+        name: legacy
+        state: import
+        target: /srv/legacy-database.sql
+      when: legacy_present['changed'] == true

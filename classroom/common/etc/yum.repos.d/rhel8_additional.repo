@@ -1,0 +1,5 @@
+[ansible-2.9-for-rhel-8-x86_64-rpms]
+baseurl = http://content.example.com/rhel8.1/x86_64/rhel8-additional/ansible-2.9-for-rhel-8-x86_64-rpms/
+enabled = true
+gpgcheck = false
+name = Red Hat Ansible Engine Core

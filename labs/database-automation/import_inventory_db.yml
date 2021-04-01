@@ -1,0 +1,25 @@
+---
+- name: Import database
+  hosts: db_servers
+  become: yes
+
+  tasks:
+    - name: Make sure inventory database exists
+      mysql_db:
+        name: FIXME
+        state: FIXME
+      register: inventory_present
+
+    - name: Is inventory database backup present?
+      stat:
+        path: /home/student/inventory.dump
+      register: inventory_bkup
+
+    - name: Import inventory backup data
+      mysql_db:
+        name: FIXME
+        state: FIXME
+        target: /home/student/inventory.dump
+      when:
+        - inventory_present['changed'] == false
+        - inventory_bkup['stat']['exists'] == true

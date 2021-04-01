@@ -1,0 +1,217 @@
+---
+- name: Configure bastion DNS to Support Email
+  hosts: bastion.lab.example.com
+  gather_facts: no
+  remote_user: root
+
+  tasks:
+    - name: Configure dnsmasq for SMTP and IMAP support
+      copy:
+        src: files/start/smtp/bastion-email-labs
+        dest: /etc/dnsmasq.d/email-labs
+      notify:
+        - restart dnsmasq
+
+  handlers:
+    - name: restart dnsmasq
+      systemd:
+        name: dnsmasq
+        state: restarted
+
+- name: Restore Student Machines to Their Non-Email Server State
+  hosts: email_servers
+  gather_facts: no
+  become: true
+
+  tasks:
+    - name: Remove postfix package
+      yum:
+        name: postfix
+        state: absent
+
+- name: Configure the Email and Web Server
+  hosts: bastion.lab.example.com
+  gather_facts: yes
+  remote_user: root
+
+  vars:
+    packages:
+    - dovecot
+    - httpd
+    services:
+    - dovecot
+    - httpd
+    firewall_services:
+    - http
+    - smtp
+    firewall_ports:
+    - 587/tcp
+    - 993/tcp
+    postfix_conf:
+      inet_interfaces: "all"
+      mynetworks: "172.25.0.0/24"
+      myhostname: "smtp.lab.example.com"
+      mydestination: "$mydomain, $myhostname, localhost.$mydomain, localhost"
+      smtpd_sasl_auth_enable: "yes"
+      smtpd_sasl_type: "dovecot"
+      smtpd_sasl_path: "private/auth"
+      smtpd_recipient_restrictions: "permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination"
+      smtpd_tls_security_level: "may"
+      smtpd_tls_cert_file: "/etc/pki/tls/certs/postfix.pem"
+      smtpd_tls_key_file: "/etc/pki/tls/private/postfix.pem"
+
+  roles:
+    - linux-system-roles.postfix
+
+  tasks:
+    - name: Add student to the mail group
+      user:
+        name: student
+        append: yes
+        groups: mail
+
+    - name: Install email and web server packages
+      yum:
+        name: "{{ packages }}"
+        state: present
+
+    - name: Configure dovecot mailbox location
+      lineinfile:
+        path: /etc/dovecot/conf.d/10-mail.conf
+        regexp: '^mail_location'
+        line: 'mail_location = mbox:~/mail:INBOX=/var/mail/%u'
+
+    - name: Configure dovecot to allow plaintext authentication
+      lineinfile:
+        path: /etc/dovecot/conf.d/10-auth.conf
+        regexp: '^disable_plaintext_auth'
+        line: 'disable_plaintext_auth = no'
+
+    - name: Configure dovecot for IMAP service
+      lineinfile:
+        path: /etc/dovecot/dovecot.conf
+        regexp: '^protocols'
+        line: 'protocols = imap'
+
+    - name: Configure dovecot for IMAP service (cont.)
+      copy:
+        src: files/start/smtp/10-master.conf
+        dest: /etc/dovecot/conf.d/10-master.conf
+
+    - name: Create dovecot-openssl.cnf
+      copy:
+        src: files/start/smtp/dovecot-openssl.cnf
+        dest: /etc/pki/dovecot/dovecot-openssl.cnf
+        backup: yes
+
+    - name: Generate dovecot key and CSR
+      command: openssl req -new -x509 -nodes -config dovecot-openssl.cnf -out certs/dovecot.pem -keyout private/dovecot.pem -days 365
+      args:
+        chdir: /etc/pki/dovecot
+#       creates: certs/dovecot.pem private/dovecot.pem
+
+    - name: Sign dovecot certificate
+      command: openssl x509 -subject -fingerprint -noout -in certs/dovecot.pem
+      args:
+        chdir: /etc/pki/dovecot
+
+    - name: Create postfix-openssl.cnf
+      copy:
+        src: files/start/smtp/postfix-openssl.cnf
+        dest: /etc/pki/tls/postfix-openssl.cnf
+        backup: yes
+
+    - name: Generate postfix key and CSR
+      command: openssl req -new -x509 -nodes -config postfix-openssl.cnf -out certs/postfix.pem -keyout private/postfix.pem -days 365
+      args:
+        chdir: /etc/pki/tls
+#       creates: certs/postfix.pem private/postfix.pem
+
+    - name: Sign postfix certificate
+      command: openssl x509 -subject -fingerprint -noout -in certs/postfix.pem
+      args:
+        chdir: /etc/pki/tls
+
+    - name: Secure dovecot and postfix keys and certificates
+      file:
+        name: "{{ item }}"
+        owner: root
+        group: root
+        mode: '0600'
+      loop:
+        - /etc/pki/dovecot/certs/dovecot.pem
+        - /etc/pki/dovecot/private/dovecot.pem
+        - /etc/pki/tls/certs/postfix.pem
+        - /etc/pki/tls/private/postfix.pem
+
+    - name: Configure postfix for incoming SMTP service
+      lineinfile:
+        path: /etc/postfix/master.cf
+        regexp: 'submission inet'
+        line: 'submission inet n       -       n       -       -       smtpd'
+
+    - name: Start email and web server services
+      systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop: "{{ services }}"
+
+    - name: Restart postfix service
+      systemd:
+        name: postfix
+        state: restarted
+
+    - name: Open firewall for services
+      firewalld:
+        service: "{{ item }}"
+        state: enabled
+        permanent: yes
+        immediate: yes
+      loop: "{{ firewall_services }}"
+
+    - name: Open other firewall ports
+      firewalld:
+        port: "{{ item }}"
+        state: enabled
+        permanent: yes
+        immediate: yes
+      loop: "{{ firewall_ports }}"
+
+    - name: Publish dovecot certificate via Apache
+      copy:
+        src: /etc/pki/dovecot/certs/dovecot.pem
+        dest: /var/www/html/dovecot.pem
+        remote_src: yes
+        mode: '0444'
+
+- name: Prepare Student Machines for Lab
+  hosts: email_servers
+  gather_facts: no
+  become: true
+
+  vars:
+    packages:
+    - mailx
+    - mutt
+
+  tasks:
+    - name: Install email client packages
+      yum:
+        name: "{{ packages }}"
+        state: present
+
+    - name: Create student Mail folder
+      file:
+        name: /home/student/Mail
+        state: directory
+        owner: student
+        group: student
+
+    - name: Create ~student/.mutt_certificates file
+      get_url:
+        url: http://imap.lab.example.com/dovecot.pem
+        dest: /home/student/.mutt_certificates
+        owner: student
+        group: student
+        mode: '0600'

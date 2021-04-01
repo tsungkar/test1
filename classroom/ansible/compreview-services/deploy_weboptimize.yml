@@ -1,0 +1,37 @@
+---
+- name: Install Varnish backend web server
+  hosts: varnish_backend
+  become: yes
+
+  tasks:
+    - name: Install HTTP and PHP packages
+      yum:
+        name: httpd, php
+        state: present
+
+    - name: Create the web server index.html
+      shell:
+        cmd: echo "This is ${HOSTNAME%%.*}" > /var/www/html/index.html
+
+    - name: Copy PHP web content to web server
+      copy:
+        src: "files/start/weboptimize/{{ item }}"
+        dest: "/var/www/html/{{ item }}"
+        mode: '0644'
+      loop:
+        - get-request.php
+        - set-cache.php
+        - set-cookie.php
+
+    - name: Open firewall for HTTP service
+      firewalld:
+        service: http
+        state: enabled
+        permanent: yes
+        immediate: yes
+
+    - name: Start the web server service
+      systemd:
+        name: httpd
+        state: started
+        enabled: yes

@@ -1,0 +1,15 @@
+---
+- name: Configure a print queue to start printing
+  hosts:
+  gather_facts: no
+  vars:
+    queue_name: "local_print_queue_name"
+  tasks:
+    - name: Confirm the print queue exists
+      command:
+      register: cmdout
+      ignore_errors: true
+      changed_when: false
+    - name: Enable the print queue
+      command:
+      when: cmdout.rc == 0

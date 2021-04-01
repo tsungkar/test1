@@ -1,0 +1,16 @@
+$TTL 300
+
+@	IN SOA	servera.pvt.example.com. dnslab.example.com. (
+				2020062000	; serial
+				1H		; refresh
+				5M		; retry
+				1W		; expire
+				1M )		; minimum
+
+; owner		TTL	CL  type	RDATA
+		600	IN  NS		servera.pvt.example.com.
+
+10			IN  PTR		servera.pvt.example.com.
+11			IN  PTR		serverb.pvt.example.com.
+12			IN  PTR		serverc.pvt.example.com.
+13			IN  PTR		serverd.pvt.example.com.

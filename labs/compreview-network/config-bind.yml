@@ -1,0 +1,79 @@
+---
+- name: Configure master nameserver
+  hosts:
+# become: yes
+
+  tasks:
+    - name: Install BIND9
+      yum:
+        name:
+        state:
+
+    - name: Copy master config file
+      copy:
+        src:
+        dest:
+        owner:
+        group:
+        mode:
+      notify:
+        - reload_named
+
+    - name: Copy forward zone file to master
+      copy:
+        src:
+        dest:
+        owner:
+        group:
+        mode:
+      notify:
+        - reload_named
+
+    - name: Copy IPv4 reverse zone file to master
+      copy:
+        src:
+        dest:
+        owner:
+        group:
+        mode:
+      notify:
+        - reload_named
+
+    - name: Copy IPv6 reverse zone file to master
+      copy:
+        src:
+        dest:
+        owner:
+        group:
+        mode:
+      notify:
+        - reload_named
+
+    - name: Copy backend config file (for zones)
+      copy:
+        src:
+        dest:
+        owner:
+        group:
+        mode:
+      notify:
+        - reload_named
+
+    - name: Allow dns service on firewall
+      firewalld:
+        service:
+        state:
+        immediate:
+        permanent:
+
+    - name: Ensure named is running and enabled
+      service:
+        name:
+        state:
+        enabled:
+
+  handlers:
+    - name: reload_named
+      service:
+        name:
+        state:

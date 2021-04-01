@@ -1,0 +1,12 @@
+---
+- name: Cleanup Database Review Materials
+  import_playbook: cleanup_database.yml
+
+- name: Cleanup Web Optimization Review Materials
+  import_playbook: cleanup_weboptimize.yml
+
+- name: Cleanup Email Review Materials
+  import_playbook: cleanup_smtp.yml
+
+# - name: Cleanup Web Review Materials
+#   import_playbook: cleanup_web.yml

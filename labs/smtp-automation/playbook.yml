@@ -1,0 +1,13 @@
+---
+- name: Configure Null Client Email Service
+  become: true
+  hosts:
+
+  vars:
+    postfix_conf:
+      relayhost:
+      inet_interfaces:
+      ...
+
+  roles:
+    - linux-system-roles....

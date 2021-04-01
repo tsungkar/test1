@@ -1,0 +1,8 @@
+server:
+        interface-automatic: {{ interface_automatic }}
+        access-control: {{ access_control }}
+        domain-insecure: "{{ domain_insecure }}"
+
+forward-zone:
+        name: "{{ forward_zone_name }}"
+        forward-addr: {{ forward_zone_addr }}
